@@ -76,7 +76,7 @@ export function TerminalView() {
   const [showServerSelector, setShowServerSelector] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   // SFTP 面板状态
-  const [sftpPanelHeight, setSftpPanelHeight] = useState(200);
+  const [sftpPanelHeight, setSftpPanelHeight] = useState(350);
   const [showSftpPanel, setShowSftpPanel] = useState(false);
   // 待同步的 SFTP 目录（终端 cd 命令触发）
   const [pendingSftpDir, setPendingSftpDir] = useState<string | null>(null);

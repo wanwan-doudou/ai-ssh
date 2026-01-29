@@ -13,6 +13,7 @@ import { save } from '@tauri-apps/plugin-dialog';
 // import { writeFile, remove as removeTempFile } from '@tauri-apps/plugin-fs';
 import { listen, UnlistenFn } from '@tauri-apps/api/event'; // 用于进度监听
 import './FileExplorer.css';
+import { FileTree } from './FileTree';
 
 interface FileExplorerProps {
   /** 会话 ID */
@@ -65,6 +66,31 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [isDragOver, setIsDragOver] = useState(false);
+  const [treeWidth, setTreeWidth] = useState(250);
+  const [pathInput, setPathInput] = useState('');
+
+  // 同步当前目录到输入框
+  useEffect(() => {
+    if (session?.currentDir) {
+      setPathInput(session.currentDir);
+    }
+  }, [session?.currentDir]);
+
+  // 处理路径输入框回车
+  const handlePathInputKeyDown = async (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      const targetPath = pathInput.trim();
+      if (!targetPath) return;
+      
+      try {
+        await changeDir(sessionId, targetPath);
+      } catch (error) {
+        console.error('跳转路径失败:', error);
+        // 如果失败，恢复原来的路径
+        setPathInput(session.currentDir);
+      }
+    }
+  };
 
   // 自动连接 - 必须等待 SSH 连接成功后才能建立 SFTP
   useEffect(() => {
@@ -411,173 +437,245 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
     );
   }
 
-  // 错误状态
-  if (session.error) {
-    return (
-      <div className={`file-explorer ${theme}`} style={{ height }}>
-        <div className="file-explorer-error">
-          <span className="error-icon">❌</span>
-          <span>{session.error}</span>
-          <button onClick={() => clearError(sessionId)}>重试</button>
-        </div>
-      </div>
-    );
-  }
+  // 错误状态不再阻塞整个视图
+  // if (session.error) { ... }
+
+  // 格式化错误信息，使其更友好
+  const getFriendlyErrorMessage = (error: string) => {
+    if (!error) return '';
+    if (error.includes('NoSuchFile') || error.includes('No such file')) {
+      return '该路径不存在，请检查后重试';
+    }
+    if (error.includes('PermissionDenied') || error.includes('Permission denied')) {
+      return '没有权限访问该路径';
+    }
+    if (error.includes('ConnectionLost') || error.includes('broken pipe')) {
+      return '连接已断开，请尝试刷新或重新连接';
+    }
+    // 移除过于技术性的前缀，只保留核心信息
+    return error.replace('获取路径信息失败: Status', '')
+                .replace('Status {', '')
+                .replace('}', '')
+                .trim() || '未知错误';
+  };
 
   return (
     <div 
       className={`file-explorer ${theme}`} 
-      style={{ height }} 
+      style={{ height, flexDirection: 'row' }} // 设置为横向布局
       onClick={closeContextMenu}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {/* 工具栏 */}
-      <div className="file-explorer-toolbar">
-        <button onClick={handleGoUp} title="返回上级目录" disabled={session.currentDir === '/'}>
-          ⬆️ 上级
-        </button>
-        <button onClick={handleRefresh} title="刷新" disabled={session.loading}>
-          🔄 刷新
-        </button>
-        <button onClick={() => setShowNewFolder(true)} title="新建文件夹">
-          📁+ 新建
-        </button>
-        <span className="current-path" title={session.currentDir}>
-          {session.currentDir}
-        </span>
-      </div>
+      {/* 左侧：文件树 */}
+      <FileTree 
+        sessionId={sessionId}
+        currentDir={session.currentDir}
+        onSelectDir={(path) => changeDir(sessionId, path)}
+        width={treeWidth}
+        isConnected={session.connected}
+      />
 
-      {/* 新建文件夹对话框 */}
-      {showNewFolder && (
-        <div className="new-folder-dialog">
-          <input
-            type="text"
-            value={newFolderName}
-            onChange={(e) => setNewFolderName(e.target.value)}
-            placeholder="文件夹名称"
-            autoFocus
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleCreateFolder();
-              if (e.key === 'Escape') {
-                setShowNewFolder(false);
-                setNewFolderName('');
-              }
-            }}
-          />
-          <button onClick={handleCreateFolder}>确定</button>
-          <button onClick={() => { setShowNewFolder(false); setNewFolderName(''); }}>取消</button>
+      {/* 分隔条 */}
+      <div
+        className="w-1 hover:bg-primary-500 cursor-col-resize flex-shrink-0 bg-surface-200 dark:bg-surface-700 transition-colors"
+        onMouseDown={(e) => {
+          e.preventDefault();
+          const startX = e.clientX;
+          const startWidth = treeWidth;
+          
+          const handleMouseMove = (moveEvent: MouseEvent) => {
+            const newWidth = Math.max(150, Math.min(600, startWidth + moveEvent.clientX - startX));
+            setTreeWidth(newWidth);
+          };
+          
+          const handleMouseUp = () => {
+            document.removeEventListener('mousemove', handleMouseMove);
+            document.removeEventListener('mouseup', handleMouseUp);
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+          };
+          
+          document.addEventListener('mousemove', handleMouseMove);
+          document.addEventListener('mouseup', handleMouseUp);
+          document.body.style.cursor = 'col-resize';
+          document.body.style.userSelect = 'none';
+        }}
+      />
+
+      {/* 右侧：原有内容 (包裹在 flex-col 容器中) */}
+      <div className="flex-1 flex flex-col min-w-0 bg-surface-50 dark:bg-surface-900/30">
+        {/* 工具栏 */}
+        <div className="file-explorer-toolbar">
+          <button onClick={handleGoUp} title="返回上级目录" disabled={session.currentDir === '/'}>
+            ⬆️ 上级
+          </button>
+          <button onClick={handleRefresh} title="刷新" disabled={session.loading}>
+            🔄 刷新
+          </button>
+          <button onClick={() => setShowNewFolder(true)} title="新建文件夹">
+            📁+ 新建
+          </button>
+          <div className="flex-1 ml-3 relative group">
+            <input 
+              type="text" 
+              className="w-full bg-surface-200 dark:bg-surface-800 border border-transparent focus:border-primary-500 rounded px-2 py-1 text-xs text-surface-700 dark:text-surface-300 font-mono transition-colors outline-none"
+              value={pathInput}
+              onChange={(e) => setPathInput(e.target.value)}
+              onKeyDown={handlePathInputKeyDown}
+              onBlur={() => setPathInput(session.currentDir)} // 失焦时恢复有效路径
+              title="按 Enter 跳转"
+            />
+          </div>
         </div>
-      )}
 
-      {/* 文件列表 */}
-      {/* 文件列表（支持拖拽上传） */}
-      <div 
-        className={`file-list ${isDragOver ? 'drag-over' : ''}`}
-      >
-        {session.loading && (
-          <div className="file-list-loading">
-            <span className="spinner"></span>
+        {/* 错误提示 Banner */}
+        {session.error && (
+          <div className="bg-red-50 dark:bg-red-900/20 border-b border-red-200 dark:border-red-800 px-3 py-2 flex items-center justify-between transition-all">
+            <div className="flex items-center gap-2 text-xs text-red-600 dark:text-red-400 overflow-hidden">
+               <span>❌</span>
+               <span className="truncate" title={session.error}>{getFriendlyErrorMessage(session.error)}</span>
+            </div>
+            <button 
+              onClick={() => clearError(sessionId)}
+              className="ml-2 text-xs text-red-500 hover:text-red-700 dark:hover:text-red-300 whitespace-nowrap px-2 py-0.5 rounded hover:bg-red-100 dark:hover:bg-red-800/40"
+            >
+              关闭
+            </button>
           </div>
         )}
-        
-        {/* 表头 */}
-        <div className="file-list-header">
-          <span className="col-name">名称</span>
-          <span className="col-size">大小</span>
-          <span className="col-modified">修改时间</span>
-          <span className="col-permissions">权限</span>
+
+        {/* 新建文件夹对话框 */}
+        {showNewFolder && (
+          <div className="new-folder-dialog">
+            <input
+              type="text"
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+              placeholder="文件夹名称"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCreateFolder();
+                if (e.key === 'Escape') {
+                  setShowNewFolder(false);
+                  setNewFolderName('');
+                }
+              }}
+            />
+            <button onClick={handleCreateFolder}>确定</button>
+            <button onClick={() => { setShowNewFolder(false); setNewFolderName(''); }}>取消</button>
+          </div>
+        )}
+
+        {/* 文件列表 */}
+        {/* 文件列表（支持拖拽上传） */}
+        <div 
+          className={`file-list ${isDragOver ? 'drag-over' : ''}`}
+        >
+          {session.loading && (
+            <div className="file-list-loading">
+              <span className="spinner"></span>
+            </div>
+          )}
+          
+          {/* 表头 */}
+          <div className="file-list-header">
+            <span className="col-name">名称</span>
+            <span className="col-size">大小</span>
+            <span className="col-modified">修改时间</span>
+            <span className="col-permissions">权限</span>
+          </div>
+
+          {/* 文件条目 */}
+          {session.files.map((file) => (
+            <div
+              key={file.path}
+              className={`file-item ${selectedFiles.has(file.path) ? 'selected' : ''} ${file.is_dir ? 'is-dir' : ''}`}
+              onClick={(e) => handleSelect(file, e)}
+              onDoubleClick={() => handleDoubleClick(file)}
+              onContextMenu={(e) => handleContextMenu(e, file)}
+            >
+              {renameTarget === file.path ? (
+                <div className="rename-input">
+                  {renderIcon(file)}
+                  <input
+                    type="text"
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                    autoFocus
+                    onBlur={handleConfirmRename}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleConfirmRename();
+                      if (e.key === 'Escape') {
+                        setRenameTarget(null);
+                        setNewName('');
+                      }
+                    }}
+                  />
+                </div>
+              ) : (
+                <>
+                  <span className="col-name">
+                    {renderIcon(file)}
+                    <span className="file-name">{file.name}</span>
+                  </span>
+                  <span className="col-size">{file.is_dir ? '-' : formatFileSize(file.size)}</span>
+                  <span className="col-modified">{formatDateTime(file.modified)}</span>
+                  <span className="col-permissions">{file.permissions}</span>
+                </>
+              )}
+            </div>
+          ))}
+
+          {session.files.length === 0 && !session.loading && (
+            <div className="file-list-empty">
+              <span>📭 空目录</span>
+            </div>
+          )}
         </div>
 
-        {/* 文件条目 */}
-        {session.files.map((file) => (
+        {/* 右键菜单 */}
+        {contextMenu && (
           <div
-            key={file.path}
-            className={`file-item ${selectedFiles.has(file.path) ? 'selected' : ''} ${file.is_dir ? 'is-dir' : ''}`}
-            onClick={(e) => handleSelect(file, e)}
-            onDoubleClick={() => handleDoubleClick(file)}
-            onContextMenu={(e) => handleContextMenu(e, file)}
+            className="context-menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onClick={(e) => e.stopPropagation()}
           >
-            {renameTarget === file.path ? (
-              <div className="rename-input">
-                {renderIcon(file)}
-                <input
-                  type="text"
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  autoFocus
-                  onBlur={handleConfirmRename}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleConfirmRename();
-                    if (e.key === 'Escape') {
-                      setRenameTarget(null);
-                      setNewName('');
-                    }
-                  }}
-                />
-              </div>
+            {contextMenu.file ? (
+              <>
+                {!contextMenu.file.is_dir && (
+                  <div className="context-menu-item" onClick={handleDownload}>
+                    📥 下载
+                  </div>
+                )}
+                <div className="context-menu-item" onClick={handleStartRename}>
+                  ✏️ 重命名
+                </div>
+                <div className="context-menu-item danger" onClick={handleDelete}>
+                  🗑️ 删除
+                </div>
+              </>
             ) : (
               <>
-                <span className="col-name">
-                  {renderIcon(file)}
-                  <span className="file-name">{file.name}</span>
-                </span>
-                <span className="col-size">{file.is_dir ? '-' : formatFileSize(file.size)}</span>
-                <span className="col-modified">{formatDateTime(file.modified)}</span>
-                <span className="col-permissions">{file.permissions}</span>
+                <div className="context-menu-item" onClick={handleRefresh}>
+                  🔄 刷新
+                </div>
+                <div className="context-menu-item" onClick={() => { setShowNewFolder(true); closeContextMenu(); }}>
+                  📁+ 新建文件夹
+                </div>
               </>
             )}
           </div>
-        ))}
-
-        {session.files.length === 0 && !session.loading && (
-          <div className="file-list-empty">
-            <span>📭 空目录</span>
-          </div>
         )}
-      </div>
 
-      {/* 右键菜单 */}
-      {contextMenu && (
-        <div
-          className="context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {contextMenu.file ? (
-            <>
-              {!contextMenu.file.is_dir && (
-                <div className="context-menu-item" onClick={handleDownload}>
-                  📥 下载
-                </div>
-              )}
-              <div className="context-menu-item" onClick={handleStartRename}>
-                ✏️ 重命名
-              </div>
-              <div className="context-menu-item danger" onClick={handleDelete}>
-                🗑️ 删除
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="context-menu-item" onClick={handleRefresh}>
-                🔄 刷新
-              </div>
-              <div className="context-menu-item" onClick={() => { setShowNewFolder(true); closeContextMenu(); }}>
-                📁+ 新建文件夹
-              </div>
-            </>
-          )}
+        {/* 状态栏 */}
+        <div className="file-explorer-status">
+          <span>{session.files.length} 项</span>
+          <span>|</span>
+          <span>{selectedFiles.size} 已选择</span>
         </div>
-      )}
-
-      {/* 状态栏 */}
-      <div className="file-explorer-status">
-        <span>{session.files.length} 项</span>
-        <span>|</span>
-        <span>{selectedFiles.size} 已选择</span>
       </div>
     </div>
   );
