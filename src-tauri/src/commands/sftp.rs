@@ -20,19 +20,10 @@ pub struct SftpState {
     pub manager: Arc<SftpManager>,
 }
 
-/// SFTP 客户端处理器（简化版，只用于建立连接）
-struct SftpClientHandler;
+use crate::sftp::SftpClientHandler;
 
-impl client::Handler for SftpClientHandler {
-    type Error = russh::Error;
+// SftpClientHandler 已移动到 crate::sftp
 
-    fn check_server_key(
-        &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
-    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        async { Ok(true) }
-    }
-}
 
 /// 加载私钥文件
 fn load_private_key(path: &str, _passphrase: Option<&str>) -> Result<PrivateKey, String> {
@@ -143,7 +134,9 @@ pub async fn sftp_connect(
     
     // 连接到 SFTP
     let manager = &state.manager;
-    manager.connect(&session_id, channel).await?;
+    // 连接到 SFTP
+    let manager = &state.manager;
+    manager.connect(&session_id, channel, session).await?;
     
     // 获取当前目录
     let current_dir = manager.get_current_dir(&session_id).await?;
