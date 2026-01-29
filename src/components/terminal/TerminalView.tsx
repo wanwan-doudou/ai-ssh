@@ -1,0 +1,657 @@
+import { useEffect, useRef, useState, useCallback } from "react";
+import { Terminal as TerminalIcon, Plus, X, Server, Bot, FolderOpen, ChevronDown, ChevronUp } from "lucide-react";
+import { useServerStore } from "@/stores/serverStore";
+import { useChatStore } from "@/stores/chatStore";
+import { useTerminalOutputStore } from "@/stores/terminalOutputStore";
+import { AiChatPanel } from "./AiChatPanel";
+import { ResizableDivider } from "./ResizableDivider";
+import { FileExplorer } from "./FileExplorer";
+import { HorizontalDivider } from "./HorizontalDivider";
+// TerminalSession type 暂未使用，session 类型为 any
+import { invoke } from "@tauri-apps/api/core";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { useTerminalStore } from "@/stores/terminalStore";
+import { useThemeStore } from "@/stores/themeStore";
+import { useTerminalDirectoryStore } from "@/stores/terminalDirectoryStore";
+
+const darkTheme = {
+  background: "#0f172a",
+  foreground: "#e2e8f0",
+  cursor: "#14b8a6",
+  cursorAccent: "#0f172a",
+  selectionBackground: "#334155",
+  black: "#0f172a",
+  red: "#f87171",
+  green: "#4ade80",
+  yellow: "#facc15",
+  blue: "#60a5fa",
+  magenta: "#c084fc",
+  cyan: "#22d3ee",
+  white: "#e2e8f0",
+  brightBlack: "#475569",
+  brightRed: "#fca5a5",
+  brightGreen: "#86efac",
+  brightYellow: "#fde047",
+  brightBlue: "#93c5fd",
+  brightMagenta: "#d8b4fe",
+  brightCyan: "#67e8f9",
+  brightWhite: "#f8fafc",
+};
+
+// 浅色主题：使用更深的 ANSI 颜色确保在白色背景上可读
+const lightTheme = {
+  background: "#ffffff",
+  foreground: "#1e293b",  // 深灰色作为主要文字颜色
+  cursor: "#0d9488",
+  cursorAccent: "#ffffff",
+  selectionBackground: "#dbeafe",  // 淡蓝色选中背景
+  black: "#1e293b",       // 深灰黑色
+  red: "#dc2626",         // 深红色 (red-600)
+  green: "#15803d",       // 深绿色 (green-700) - 确保在白底上清晰可读
+  yellow: "#a16207",      // 深黄/棕色 (yellow-700) - 避免浅黄难以辨认
+  blue: "#1d4ed8",        // 深蓝色 (blue-700)
+  magenta: "#7e22ce",     // 深紫色 (purple-700)
+  cyan: "#0e7490",        // 深青色 (cyan-700)
+  white: "#475569",       // 中灰色 (slate-600) - 用于普通文本
+  brightBlack: "#64748b", // 中灰色 (slate-500)
+  brightRed: "#b91c1c",   // 暗红色 (red-700)
+  brightGreen: "#166534", // 暗绿色 (green-800)
+  brightYellow: "#854d0e",// 暗棕色 (yellow-800)
+  brightBlue: "#1e40af",  // 暗蓝色 (blue-800)
+  brightMagenta: "#6b21a8",// 暗紫色 (purple-800)
+  brightCyan: "#155e75",  // 暗青色 (cyan-800)
+  brightWhite: "#1e293b", // 深灰色 (slate-800)
+};
+
+export function TerminalView() {
+  const { servers, fetchServers } = useServerStore();
+  const { 
+    sessions, 
+    activeSessionId, 
+    addSession, 
+    removeSession, 
+    setActiveSessionId,
+    setSessionConnected
+  } = useTerminalStore();
+  const [showServerSelector, setShowServerSelector] = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
+  // SFTP 面板状态
+  const [sftpPanelHeight, setSftpPanelHeight] = useState(200);
+  const [showSftpPanel, setShowSftpPanel] = useState(false);
+  // 待同步的 SFTP 目录（终端 cd 命令触发）
+  const [pendingSftpDir, setPendingSftpDir] = useState<string | null>(null);
+
+  // 组件挂载时从后端加载服务器列表
+  useEffect(() => {
+    fetchServers();
+  }, [fetchServers]);
+
+  const handleConnect = async (serverId: string) => {
+    console.log('[TerminalView] handleConnect 被调用, serverId=', serverId);
+    const server = servers.find(s => s.id === serverId);
+    if (!server) {
+      console.error('[TerminalView] 未找到服务器!');
+      return;
+    }
+
+    const sessionId = `session_${Date.now()}`;
+    console.log('[TerminalView] 创建会话, sessionId=', sessionId);
+    
+    addSession({
+      id: sessionId,
+      serverId: server.id,
+      serverName: server.name,
+      isConnected: false,
+      createdAt: Date.now(),
+      buffer: '',
+    });
+    
+    setShowServerSelector(false);
+  };
+
+  const handleSessionConnected = useCallback((sessionId: string) => {
+    setSessionConnected(sessionId, true);
+  }, [setSessionConnected]);
+
+  const handleSessionDisconnected = useCallback((sessionId: string) => {
+    setSessionConnected(sessionId, false);
+  }, [setSessionConnected]);
+
+  // 处理终端目录变化，同步到 SFTP 文件浏览器
+  const handleDirectoryChange = useCallback((directory: string) => {
+    console.log('[TerminalView] 检测到目录变化:', directory);
+    // 设置待同步目录
+    setPendingSftpDir(directory);
+    // 自动展开 SFTP 面板
+    if (!showSftpPanel) {
+      setShowSftpPanel(true);
+    }
+  }, [showSftpPanel]);
+
+  const handleCloseSession = async (sessionId: string) => {
+    // 调用后端断开连接
+    try {
+      await invoke("disconnect_ssh", { sessionId });
+    } catch (err) {
+      console.error("断开连接失败:", err);
+    }
+    
+    removeSession(sessionId);
+  };
+
+  // 引用 Chat Store
+  const { panelRatio, setPanelRatio, operationMode: _opMode } = useChatStore();
+  const [containerWidth, setContainerWidth] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // 监听容器宽度变化
+  useEffect(() => {
+    if (!containerRef.current) return;
+    
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setContainerWidth(entry.contentRect.width);
+      }
+    });
+    
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  const handleExecuteCommand = (command: string) => {
+    if (!activeSessionId) return;
+    
+    // 调用后端执行命令
+    invoke("write_ssh", {
+      sessionId: activeSessionId,
+      data: command + "\n", // 自动添加换行符执行
+    }).catch(console.error);
+  };
+
+  return (
+    <div className="h-full flex flex-col bg-surface-50 dark:bg-surface-950 transition-colors duration-300">
+      {/* 标签页栏 */}
+      <div className="h-12 flex items-center bg-surface-100 dark:bg-surface-950 border-b border-surface-200 dark:border-surface-800 px-2 flex-shrink-0 transition-colors duration-300">
+        <div className="flex items-center gap-1 flex-1 overflow-x-auto">
+          {sessions.map((session) => (
+            <div
+              key={session.id}
+              onClick={() => setActiveSessionId(session.id)}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg cursor-pointer group transition-all ${
+                activeSessionId === session.id
+                  ? "bg-white dark:bg-surface-800 text-surface-900 dark:text-white shadow-sm border border-surface-200 dark:border-transparent"
+                  : "text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-800 hover:text-surface-900 dark:hover:text-surface-200"
+              }`}
+            >
+              <div className={`w-2 h-2 rounded-full ${
+                session.isConnected ? "bg-green-500" : "bg-yellow-500 animate-pulse"
+              }`} />
+              <span className="text-sm font-medium truncate max-w-32">{session.serverName}</span>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleCloseSession(session.id); }}
+                className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-surface-300 dark:hover:bg-surface-600 transition-opacity"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {/* 新建连接按钮 */}
+        <div className="relative">
+          <button
+            onClick={() => setShowServerSelector(!showServerSelector)}
+            className="p-2 rounded-lg hover:bg-surface-200 dark:hover:bg-surface-800 text-surface-600 dark:text-surface-400 hover:text-surface-900 dark:hover:text-white transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+          </button>
+
+          {/* 服务器选择下拉 */}
+          {showServerSelector && (
+            <div className="absolute right-0 top-full mt-2 w-64 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-lg shadow-xl z-20">
+              <div className="p-2 border-b border-surface-200 dark:border-surface-700">
+                <span className="text-xs text-surface-500 font-medium">选择服务器</span>
+              </div>
+              {servers.length === 0 ? (
+                <div className="p-4 text-center text-surface-500">
+                  <Server className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p className="text-sm">暂无服务器</p>
+                  <p className="text-xs mt-1">请先在服务器管理中添加</p>
+                </div>
+              ) : (
+                <div className="max-h-64 overflow-y-auto">
+                  {servers.map((server) => (
+                    <button
+                      key={server.id}
+                      onClick={() => handleConnect(server.id)}
+                      className="w-full px-3 py-2.5 flex items-center gap-3 hover:bg-surface-100 dark:hover:bg-surface-700 transition-colors text-left"
+                    >
+                      <Server className="w-4 h-4 text-primary-600 dark:text-primary-400" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-surface-900 dark:text-white truncate">{server.name}</p>
+                        <p className="text-xs text-surface-500 truncate">{server.host}:{server.port}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 內容区 Flex 容器 */}
+      <div 
+        ref={containerRef}
+        className="flex-1 flex overflow-hidden bg-surface-50 dark:bg-surface-950 relative transition-colors duration-300"
+      >
+        {/* 左侧：终端区域 + SFTP 浏览器 */}
+        <div 
+          className={`h-full min-w-0 flex flex-col ${isResizing ? 'transition-none' : 'transition-[width] duration-75'}`}
+          style={{ width: `${(1 - panelRatio) * 100}%` }}
+        >
+          {sessions.length === 0 ? (
+            <EmptyTerminal onNewConnection={() => setShowServerSelector(true)} />
+          ) : (
+            <>
+              {/* 终端区域 */}
+              <div 
+                className="relative font-mono min-h-0" 
+                style={{ flex: showSftpPanel ? `1 1 calc(100% - ${sftpPanelHeight}px - 6px)` : '1 1 100%' }}
+              >
+                {sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className={`h-full absolute inset-0 ${activeSessionId === session.id ? "z-10 block" : "z-0 hidden"}`}
+                  >
+                    <TerminalInstance 
+                      session={session} 
+                      onConnected={() => handleSessionConnected(session.id)}
+                      onDisconnected={() => handleSessionDisconnected(session.id)}
+                      onDirectoryChange={handleDirectoryChange}
+                    />
+                  </div>
+                ))}
+              </div>
+              
+              {/* SFTP 面板切换按钮 */}
+              <div className="flex-shrink-0 h-8 flex items-center justify-between px-3 bg-surface-100 dark:bg-surface-900 border-t border-surface-200 dark:border-surface-800">
+                <button
+                  onClick={() => setShowSftpPanel(!showSftpPanel)}
+                  className="flex items-center gap-2 text-xs text-surface-600 dark:text-surface-400 hover:text-surface-900 dark:hover:text-white transition-colors"
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  <span>文件浏览器</span>
+                  {showSftpPanel ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
+                </button>
+                {showSftpPanel && activeSessionId && (
+                  <span className="text-xs text-surface-500">使用 SFTP 浏览远程文件</span>
+                )}
+              </div>
+              
+              {/* SFTP 文件浏览器面板 */}
+              {showSftpPanel && activeSessionId && (
+                <>
+                  <HorizontalDivider
+                    position={sftpPanelHeight}
+                    onPositionChange={setSftpPanelHeight}
+                    minHeight={150}
+                    maxHeight={500}
+                  />
+                  <div style={{ height: sftpPanelHeight }} className="flex-shrink-0">
+                    <FileExplorer
+                      sessionId={activeSessionId}
+                      serverId={sessions.find(s => s.id === activeSessionId)?.serverId || ''}
+                      height={sftpPanelHeight}
+                      syncDirectory={pendingSftpDir}
+                      onSyncComplete={() => setPendingSftpDir(null)}
+                      isSSHConnected={sessions.find(s => s.id === activeSessionId)?.isConnected || false}
+                    />
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* 分隔条 */}
+        <ResizableDivider 
+          ratio={panelRatio} 
+          onRatioChange={setPanelRatio} 
+          containerWidth={containerWidth}
+          minLeftWidth={350}
+          onDragStart={() => setIsResizing(true)}
+          onDragEnd={() => setIsResizing(false)} 
+        />
+
+        {/* 右侧：AI 对话面板 */}
+        {/* 右侧：AI 对话面板 */}
+        <div 
+          className={`h-full border-l border-surface-200 dark:border-surface-800 bg-surface-50 dark:bg-surface-900 transition-colors duration-300 ${
+            isResizing ? 'transition-none' : 'transition-[width] duration-300'
+          }`}
+          style={{ width: `${panelRatio * 100}%` }}
+        >
+          {activeSessionId ? (
+            <AiChatPanel 
+              sessionId={activeSessionId}
+              onExecuteCommand={handleExecuteCommand}
+            />
+          ) : (
+            <div className="h-full flex flex-col items-center justify-center text-surface-500 p-4 text-center">
+              <div className="w-12 h-12 rounded-xl bg-surface-200 dark:bg-surface-800/50 flex items-center justify-center mb-4 text-primary-600 dark:text-primary-400">
+                <Bot className="w-6 h-6 opacity-60" />
+              </div>
+              <p className="text-sm">选择或创建一个终端会话<br/>以开始使用 AI 助手</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmptyTerminal({ onNewConnection }: { onNewConnection: () => void }) {
+  return (
+    <div className="h-full flex flex-col items-center justify-center text-surface-400 dark:text-surface-500">
+      <div className="w-20 h-20 rounded-2xl bg-surface-200 dark:bg-surface-800/50 flex items-center justify-center mb-6 text-primary-600 dark:text-primary-400">
+        <TerminalIcon className="w-10 h-10 opacity-60" />
+      </div>
+      <h3 className="text-lg font-medium text-surface-700 dark:text-surface-300 mb-2">开始新的终端会话</h3>
+      <p className="text-sm mb-6 text-surface-500">连接到您的服务器开始工作</p>
+      <button onClick={onNewConnection} className="btn-primary flex items-center gap-2">
+        <Plus className="w-4 h-4" />
+        新建连接
+      </button>
+    </div>
+  );
+}
+
+interface TerminalInstanceProps {
+  session: any; // 使用 store 中的扩展类型，这里暂时用 any 或需要导出类型
+  onConnected: () => void;
+  onDisconnected: () => void;
+  onDirectoryChange?: (directory: string) => void; // 目录变化回调
+}
+
+function TerminalInstance({ session, onConnected, onDisconnected, onDirectoryChange }: TerminalInstanceProps) {
+  const terminalRef = useRef<HTMLDivElement>(null);
+  const terminalInstanceRef = useRef<any>(null);
+  const fitAddonRef = useRef<any>(null);
+  // 防止重复连接的标志
+  const connectionInitiatedRef = useRef<boolean>(false);
+  // 跟踪 SSH 连接状态，用于控制 ResizeObserver 是否发送 resize 命令
+  const sshConnectedRef = useRef<boolean>(session.isConnected || false);
+  const [_connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
+  const [_errorMessage, setErrorMessage] = useState<string | null>(null);
+  
+  // 获取主题
+  const { theme } = useThemeStore();
+
+  // 获取终端输出存储函数
+  const appendOutput = useTerminalOutputStore((state) => state.appendOutput);
+  // 获取会话持久化存储函数
+  const appendSessionOutput = useTerminalStore((state) => state.appendSessionOutput);
+  // 获取设置 buffer 恢复状态的函数
+  const setBufferRestored = useTerminalStore((state) => state.setBufferRestored);
+  // 获取目录检测函数
+  const parseAndUpdateFromOutput = useTerminalDirectoryStore((state) => state.parseAndUpdateFromOutput);
+
+  // 监听主题变化更新终端主题
+  useEffect(() => {
+    if (terminalInstanceRef.current && terminalRef.current) {
+      const term = terminalInstanceRef.current;
+      const container = terminalRef.current;
+      
+      // 创建新的主题对象（xterm.js 使用引用比较）
+      const newTheme = theme === 'dark' ? { ...darkTheme } : { ...lightTheme };
+      const bgColor = newTheme.background || '#000000';
+      
+      console.log('[TerminalView] Applying theme:', theme);
+      
+      // 1. 设置主题 - 只修改 theme 属性，不整体替换 options
+      term.options.theme = newTheme;
+      
+      // 2. DOM 操作更新背景色
+      container.style.backgroundColor = bgColor;
+      
+      const viewport = container.querySelector('.xterm-viewport') as HTMLElement;
+      if (viewport) {
+        viewport.style.backgroundColor = bgColor;
+      }
+      
+      const screen = container.querySelector('.xterm-screen') as HTMLElement;
+      if (screen) {
+        screen.style.backgroundColor = bgColor;
+      }
+      
+      // 3. 清除字形纹理缓存
+      if (typeof term.clearTextureAtlas === 'function') {
+        term.clearTextureAtlas();
+      }
+      
+      // 4. 刷新终端
+      term.refresh(0, term.rows - 1);
+      
+      // 5. 使用多次延迟刷新确保渲染更新
+      const refreshAttempts = [0, 50, 100, 200];
+      refreshAttempts.forEach(delay => {
+        setTimeout(() => {
+          if (terminalInstanceRef.current) {
+            if (typeof terminalInstanceRef.current.clearTextureAtlas === 'function') {
+              terminalInstanceRef.current.clearTextureAtlas();
+            }
+            terminalInstanceRef.current.refresh(0, terminalInstanceRef.current.rows - 1);
+          }
+        }, delay);
+      });
+      
+      console.log('[TerminalView] Theme update scheduled');
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    let unlistenOutput: UnlistenFn | null = null;
+    let unlistenDisconnect: UnlistenFn | null = null;
+    let terminal: any = null;
+    let fitAddon: any = null;
+    let resizeObserver: ResizeObserver | null = null;
+
+    const initTerminal = async () => {
+      const { Terminal } = await import("@xterm/xterm");
+      const { FitAddon } = await import("@xterm/addon-fit");
+      const { WebLinksAddon } = await import("@xterm/addon-web-links");
+      
+      await import("@xterm/xterm/css/xterm.css");
+
+      if (!terminalRef.current) return;
+
+      terminal = new Terminal({
+        fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
+        fontSize: 14,
+        lineHeight: 1.4,
+        cursorBlink: true,
+        cursorStyle: "bar",
+        scrollback: 10000,
+        theme: useThemeStore.getState().theme === 'dark' ? darkTheme : lightTheme,
+        allowTransparency: true, // 开启透明，使用容器背景色，解决主题切换背景不更新的问题
+      });
+
+      fitAddon = new FitAddon();
+      terminal.loadAddon(fitAddon);
+      terminal.loadAddon(new WebLinksAddon());
+
+      terminal.open(terminalRef.current);
+      fitAddon.fit();
+
+      terminalInstanceRef.current = terminal;
+      fitAddonRef.current = fitAddon;
+      
+      // 设置容器背景色与终端一致
+      if (terminalRef.current) {
+        terminalRef.current.style.backgroundColor = theme === 'dark' ? darkTheme.background : lightTheme.background;
+      }
+
+      // 如果有缓存的输出且尚未恢复过，先恢复显示
+      // 使用 store 中的 bufferRestored 状态来追踪，避免页面切换时重复恢复
+      if (session.buffer && !session.bufferRestored) {
+        terminal.write(session.buffer);
+        // 标记 buffer 已恢复，防止再次恢复
+        setBufferRestored(session.id, true);
+      }
+
+      // 使用 ResizeObserver 监听容器大小变化
+      resizeObserver = new ResizeObserver(() => {
+        if (fitAddon) {
+          try {
+            fitAddon.fit();
+            // 只有在 SSH 已连接时才通知后端终端大小变化
+            // 避免在连接建立前发送 resize 命令导致 "会话不存在" 错误
+            if (sshConnectedRef.current) {
+              const dims = fitAddon.proposeDimensions();
+              if (dims) {
+                invoke("resize_ssh", {
+                  sessionId: session.id,
+                  cols: dims.cols,
+                  rows: dims.rows,
+                }).catch(console.error);
+              }
+            }
+          } catch (e) {
+            console.error("Resize error:", e);
+          }
+        }
+      });
+      
+      if (terminalRef.current) {
+        resizeObserver.observe(terminalRef.current);
+      }
+
+      // 监听来自后端的 SSH 输出
+      unlistenOutput = await listen<string>(`ssh-output-${session.id}`, (event) => {
+        if (terminal) {
+          terminal.write(event.payload);
+          // 1. 存入 AI 分析缓冲区
+          appendOutput(session.id, event.payload);
+          // 2. 存入会话恢复缓冲区
+          appendSessionOutput(session.id, event.payload);
+          // 3. 检测目录变化并同步 SFTP
+          const newDir = parseAndUpdateFromOutput(session.id, event.payload);
+          if (newDir && onDirectoryChange) {
+            onDirectoryChange(newDir);
+          }
+        }
+      });
+
+      // 监听断开连接事件
+      unlistenDisconnect = await listen<string>(`ssh-disconnected-${session.id}`, (event) => {
+        setConnectionStatus('disconnected');
+        onDisconnected();
+        if (terminal) {
+          terminal.writeln("");
+          terminal.writeln(`\x1b[31m✗\x1b[0m 连接已断开: ${event.payload}`);
+        }
+      });
+
+      // 处理用户输入 - 发送到后端
+      terminal.onData((data: string) => {
+        invoke("write_ssh", {
+          sessionId: session.id,
+          data: data,
+        }).catch((err) => {
+          console.error("发送数据失败:", err);
+        });
+      });
+
+      // 如果已经连接过，就不需要再次连接了
+      if (session.isConnected) {
+        console.log('[Terminal] 会话已存在连接, 恢复显示');
+        setConnectionStatus('connected');
+        
+        // 恢复后发送一次 resize 确保尺寸正确
+        setTimeout(() => {
+            const dims = fitAddon.proposeDimensions();
+            if (dims) {
+              invoke("resize_ssh", {
+                sessionId: session.id,
+                cols: dims.cols,
+                rows: dims.rows,
+              }).catch(console.error);
+            }
+        }, 100);
+        
+        return;
+      }
+
+      // 防止重复连接：如果已经发起过连接请求，直接返回
+      if (connectionInitiatedRef.current) {
+        console.log('[Terminal] 连接已在进行中, 跳过重复连接');
+        return;
+      }
+      connectionInitiatedRef.current = true;
+
+      // 显示连接中信息
+      terminal.writeln(`\x1b[33m⏳\x1b[0m 正在连接 \x1b[1m${session.serverName}\x1b[0m ...`);
+
+      // 发起 SSH 连接
+      console.log('[Terminal] 开始调用 connect_ssh, sessionId=', session.id, 'serverId=', session.serverId);
+      try {
+        const result = await invoke("connect_ssh", {
+          sessionId: session.id,
+          serverId: session.serverId,
+        });
+        console.log('[Terminal] connect_ssh 返回成功:', result);
+        
+        // 标记 SSH 已连接，允许 ResizeObserver 发送 resize 命令
+        sshConnectedRef.current = true;
+        setConnectionStatus('connected');
+        onConnected();
+        console.log('[Terminal] 连接状态已更新为 connected');
+        
+        // 发送初始终端大小
+        const dims = fitAddon.proposeDimensions();
+        if (dims) {
+          console.log('[Terminal] 发送终端大小:', dims);
+          await invoke("resize_ssh", {
+            sessionId: session.id,
+            cols: dims.cols,
+            rows: dims.rows,
+          });
+        }
+      } catch (err: any) {
+        console.error('[Terminal] connect_ssh 调用失败:', err);
+        setConnectionStatus('error');
+        setErrorMessage(err.toString());
+        terminal.writeln("");
+        terminal.writeln(`\x1b[31m✗\x1b[0m 连接失败: ${err}`);
+        terminal.writeln("");
+        terminal.writeln("\x1b[90m请检查服务器配置和网络连接\x1b[0m");
+      }
+
+      return;
+    };
+
+    initTerminal();
+
+    // 清理函数
+    return () => {
+      if (unlistenOutput) {
+        unlistenOutput();
+      }
+      if (unlistenDisconnect) {
+        unlistenDisconnect();
+      }
+      if (terminalInstanceRef.current) {
+        terminalInstanceRef.current.dispose();
+        terminalInstanceRef.current = null;
+      }
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
+    };
+  }, [session.id, session.serverId, session.serverName]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div ref={terminalRef} className="terminal-container h-full" />
+  );
+}

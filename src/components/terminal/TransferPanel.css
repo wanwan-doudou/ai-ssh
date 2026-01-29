@@ -1,0 +1,257 @@
+/**
+ * 传输进度面板样式
+ */
+
+.transfer-panel {
+  position: relative;
+  border-top: 1px solid var(--border-color, #333);
+  background: var(--bg-primary, #1e1e1e);
+  font-size: 12px;
+  max-height: 200px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 浅色主题 */
+.transfer-panel.light {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f5;
+  --bg-hover: #e8e8e8;
+  --text-primary: #333333;
+  --text-secondary: #666666;
+  --border-color: #ddd;
+  --progress-bg: #e0e0e0;
+  --progress-fill: #007acc;
+  --success-color: #28a745;
+  --error-color: #dc3545;
+}
+
+/* 深色主题 */
+.transfer-panel.dark {
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #252526;
+  --bg-hover: #2a2d2e;
+  --text-primary: #cccccc;
+  --text-secondary: #888888;
+  --border-color: #333;
+  --progress-bg: #3c3c3c;
+  --progress-fill: #007acc;
+  --success-color: #4caf50;
+  --error-color: #f44336;
+}
+
+/* 标题栏 */
+.transfer-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.transfer-panel-header:hover {
+  background: var(--bg-hover);
+}
+
+.transfer-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.transfer-icon {
+  font-size: 14px;
+}
+
+.transfer-badge {
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: normal;
+}
+
+.transfer-badge.active {
+  background: #007acc;
+  color: #fff;
+}
+
+.transfer-badge.completed {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.transfer-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.clear-btn {
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.15s ease;
+}
+
+.clear-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.toggle-icon {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+/* 任务列表 */
+.transfer-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 150px;
+}
+
+.transfer-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  position: relative;
+}
+
+.transfer-item:hover {
+  background: var(--bg-hover);
+}
+
+.transfer-item:last-child {
+  border-bottom: none;
+}
+
+/* 文件信息行 */
+.transfer-item-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+}
+
+.transfer-type-icon {
+  font-size: 14px;
+}
+
+.transfer-file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-status-icon {
+  font-size: 12px;
+}
+
+/* 进度条 */
+.transfer-progress-bar {
+  height: 4px;
+  background: var(--progress-bg);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.transfer-progress-fill {
+  height: 100%;
+  background: var(--progress-fill);
+  border-radius: 2px;
+  transition: width 0.2s ease;
+}
+
+.transfer-item.status-success .transfer-progress-fill {
+  background: var(--success-color);
+}
+
+.transfer-item.status-error .transfer-progress-fill {
+  background: var(--error-color);
+}
+
+/* 进度详情 */
+.transfer-item-details {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.transfer-speed {
+  color: #007acc;
+}
+
+.transfer-error {
+  color: var(--error-color);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+/* 移除按钮 */
+.transfer-remove-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 10px;
+  opacity: 0;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.transfer-item:hover .transfer-remove-btn {
+  opacity: 1;
+}
+
+.transfer-remove-btn:hover {
+  background: var(--error-color);
+  color: #fff;
+}
+
+/* 折叠状态 */
+.transfer-panel.collapsed .transfer-panel-body {
+  display: none;
+}
+
+/* 滚动条样式 */
+.transfer-panel-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.transfer-panel-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.transfer-panel-body::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+.transfer-panel-body::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}

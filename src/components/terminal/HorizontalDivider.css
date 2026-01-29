@@ -1,0 +1,47 @@
+/**
+ * 水平分隔条样式
+ */
+
+.horizontal-divider {
+  position: relative;
+  height: 6px;
+  background: transparent;
+  cursor: ns-resize;
+  z-index: 10;
+  flex-shrink: 0;
+}
+
+.horizontal-divider::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 2px;
+  height: 2px;
+  background: var(--border-color, #333);
+  transition: background 0.15s ease;
+}
+
+.horizontal-divider:hover::before,
+.horizontal-divider.dragging::before {
+  background: #007acc;
+}
+
+.horizontal-divider-handle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-color, #333);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.horizontal-divider:hover .horizontal-divider-handle,
+.horizontal-divider.dragging .horizontal-divider-handle {
+  opacity: 1;
+  background: #007acc;
+}

@@ -1,0 +1,20 @@
+{
+  "version": "2.0",
+  "project_path": "\\\\?\\D:\\Code\\ai-ssh",
+  "entries": [
+    {
+      "id": "91747602-fe09-4a34-bb9b-b6629c8c01f4",
+      "content": "xterm.js theme update requires forced refresh with slight delay when allowTransparency is enabled",
+      "content_normalized": "xtermjs theme update requires forced refresh with slight delay when allowtransparency is enabled",
+      "category": "Pattern",
+      "created_at": "2026-01-28T05:49:30.985011800Z",
+      "updated_at": "2026-01-28T05:49:30.985011800Z"
+    }
+  ],
+  "last_dedup_at": "2026-01-28T02:35:45.083562800Z",
+  "config": {
+    "similarity_threshold": 0.7,
+    "dedup_on_startup": true,
+    "enable_dedup": true
+  }
+}

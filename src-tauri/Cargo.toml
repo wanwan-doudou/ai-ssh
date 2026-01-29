@@ -1,0 +1,47 @@
+[package]
+name = "ai-ssh"
+version = "0.1.0"
+description = "AI-SSH Terminal - 智能 SSH 终端"
+authors = ["AI-SSH Team"]
+edition = "2021"
+
+[lib]
+name = "ai_ssh_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+# SSH 相关 (使用 russh - 纯 Rust 实现，支持现代加密算法)
+# 使用 ring 后端避免 aws-lc-sys 在 Windows 的编译问题
+russh = { version = "0.57", default-features = false, features = ["ring"] }
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "crypto"] }
+russh-sftp = "2.1"
+async-trait = "0.1"
+futures = "0.3"
+# HTTP 客户端 (用于测试 AI API 连接)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+# 数据库
+rusqlite = { version = "0.32", features = ["bundled"] }
+# 加密
+aes-gcm = "0.10"
+base64 = "0.22"
+rand = "0.9"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
