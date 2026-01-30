@@ -3,6 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useThemeStore } from '../../stores/themeStore';
+import { FileText, Save, Loader2, RefreshCw, XCircle } from 'lucide-react';
 
 interface EditorParams {
   sessionId: string;
@@ -91,8 +92,8 @@ export const FileEditorWindow: React.FC = () => {
   if (isLoading) {
     return (
       <div className={`h-screen flex flex-col items-center justify-center bg-surface-50 dark:bg-surface-950 text-surface-900 dark:text-surface-100 ${theme}`}>
-        <div className="animate-spin text-3xl mb-2">↻</div>
-        <div>正在加载文件...</div>
+        <Loader2 className="w-8 h-8 animate-spin text-primary-500 mb-3" />
+        <div className="text-surface-600 dark:text-surface-400">正在加载文件...</div>
       </div>
     );
   }
@@ -100,12 +101,14 @@ export const FileEditorWindow: React.FC = () => {
   if (error) {
     return (
       <div className={`h-screen flex flex-col items-center justify-center bg-surface-50 dark:bg-surface-950 text-surface-900 dark:text-surface-100 ${theme} p-4`}>
-        <div className="text-red-500 text-xl mb-2">❌ 加载失败</div>
-        <div className="text-surface-600 dark:text-surface-400 mb-4">{error}</div>
+        <XCircle className="w-14 h-14 text-red-400 mb-4" strokeWidth={1.5} />
+        <div className="text-red-500 text-lg font-medium mb-2">加载失败</div>
+        <div className="text-surface-600 dark:text-surface-400 mb-4 text-center max-w-md">{error}</div>
         <button 
           onClick={() => window.location.reload()}
-          className="px-4 py-2 bg-primary-500 text-white rounded hover:bg-primary-600"
+          className="px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 transition-colors flex items-center gap-2"
         >
+          <RefreshCw className="w-4 h-4" />
           重试
         </button>
       </div>
@@ -116,8 +119,10 @@ export const FileEditorWindow: React.FC = () => {
     <div className={`flex flex-col h-screen bg-surface-50 dark:bg-surface-950 text-surface-900 dark:text-surface-100 ${theme}`}>
       {/* 工具栏 */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-surface-200 dark:border-surface-800 bg-surface-100 dark:bg-surface-900">
-        <div className="flex items-center gap-2 overflow-hidden">
-          <span className="text-xl">📝</span>
+        <div className="flex items-center gap-3 overflow-hidden">
+          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-primary-500 to-primary-600 flex items-center justify-center shadow-sm">
+            <FileText className="w-5 h-5 text-white" />
+          </div>
           <div className="flex flex-col">
               <span className="font-medium truncate text-sm" title={params?.path}>
                 {params?.path.split('/').pop()}
@@ -139,7 +144,11 @@ export const FileEditorWindow: React.FC = () => {
                 : 'bg-primary-500 hover:bg-primary-600 text-white shadow-sm'
               }`}
           >
-            {isSaving ? '保存中...' : '💾 保存'}
+            {isSaving ? (
+              <><Loader2 className="w-4 h-4 animate-spin" /> 保存中...</>
+            ) : (
+              <><Save className="w-4 h-4" /> 保存</>
+            )}
           </button>
         </div>
       </div>

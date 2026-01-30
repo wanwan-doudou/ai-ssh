@@ -1,7 +1,7 @@
 {
   "identifier": "main-capability",
   "description": "Main app capability",
-  "windows": ["main"],
+  "windows": ["main", "editor-*"],
   "permissions": [
     "core:default",
     "shell:allow-open",
@@ -11,6 +11,7 @@
     "dialog:allow-save",
     "dialog:allow-open",
     "fs:default",
+    "core:webview:allow-create-webview-window",
     {
       "identifier": "fs:allow-write-file",
       "allow": [{ "path": "**" }]

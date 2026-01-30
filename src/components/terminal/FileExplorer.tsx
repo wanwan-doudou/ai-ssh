@@ -14,6 +14,10 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { listen, UnlistenFn } from '@tauri-apps/api/event'; // 用于进度监听
 import './FileExplorer.css';
 import { FileTree } from './FileTree';
+import { 
+  ArrowUp, RefreshCw, FolderPlus, FilePlus, Folder, FileText, 
+  Download, Pencil, Trash2, XCircle, Inbox 
+} from 'lucide-react';
 
 interface FileExplorerProps {
   /** 会话 ID */
@@ -240,13 +244,25 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
       // 构建 URL
       const url = `index.html?mode=editor&sessionId=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(file.path)}`;
       
-      new WebviewWindow(windowLabel, {
+      const editorWindow = new WebviewWindow(windowLabel, {
         url,
         title: `${fileName} - 编辑器`,
         width: 800,
         height: 600,
         center: true,
       });
+      
+      // 监听窗口创建事件
+      editorWindow.once('tauri://created', () => {
+        console.log('编辑器窗口创建成功:', windowLabel);
+      });
+      
+      // 监听窗口创建错误
+      editorWindow.once('tauri://error', (e) => {
+        console.error('编辑器窗口创建失败:', windowLabel, e);
+        alert(`无法打开编辑器窗口: ${e.payload || '未知错误'}`);
+      });
+      
       console.log('打开编辑器窗口:', windowLabel, url);
     }
   }, [sessionId, changeDir]);
@@ -465,7 +481,13 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
   // 渲染文件图标
   const renderIcon = (file: FileEntry) => {
     const iconName = getFileIcon(file.name, file.is_dir);
-    return <span className={`file-icon icon-${iconName}`}>{file.is_dir ? '📁' : '📄'}</span>;
+    return (
+      <span className={`file-icon icon-${iconName}`}>
+        {file.is_dir 
+          ? <Folder className="w-4 h-4 text-amber-500" /> 
+          : <FileText className="w-4 h-4 text-surface-500" />}
+      </span>
+    );
   };
 
   // 加载中状态
@@ -556,16 +578,16 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
         {/* 工具栏 */}
         <div className="file-explorer-toolbar">
           <button onClick={handleGoUp} title="返回上级目录" disabled={session.currentDir === '/'}>
-            ⬆️ 上级
+            <ArrowUp className="w-3.5 h-3.5" /> 上级
           </button>
           <button onClick={handleRefresh} title="刷新" disabled={session.loading}>
-            🔄 刷新
+            <RefreshCw className="w-3.5 h-3.5" /> 刷新
           </button>
           <button onClick={() => setShowNewFolder(true)} title="新建文件夹">
-            📁+ 文件夹
+            <FolderPlus className="w-3.5 h-3.5" /> 文件夹
           </button>
           <button onClick={() => setShowNewFile(true)} title="新建文件">
-            📄+ 文件
+            <FilePlus className="w-3.5 h-3.5" /> 文件
           </button>
           <div className="flex-1 ml-3 relative group">
             <input 
@@ -584,7 +606,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
         {session.error && (
           <div className="bg-red-50 dark:bg-red-900/20 border-b border-red-200 dark:border-red-800 px-3 py-2 flex items-center justify-between transition-all">
             <div className="flex items-center gap-2 text-xs text-red-600 dark:text-red-400 overflow-hidden">
-               <span>❌</span>
+               <XCircle className="w-4 h-4 flex-shrink-0" />
                <span className="truncate" title={session.error}>{getFriendlyErrorMessage(session.error)}</span>
             </div>
             <button 
@@ -702,7 +724,8 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
 
           {session.files.length === 0 && !session.loading && (
             <div className="file-list-empty">
-              <span>📭 空目录</span>
+              <Inbox className="w-6 h-6 text-surface-400 mb-1" />
+              <span>空目录</span>
             </div>
           )}
         </div>
@@ -718,26 +741,26 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
               <>
                 {!contextMenu.file.is_dir && (
                   <div className="context-menu-item" onClick={handleDownload}>
-                    📥 下载
+                    <Download className="w-4 h-4" /> 下载
                   </div>
                 )}
                 <div className="context-menu-item" onClick={handleStartRename}>
-                  ✏️ 重命名
+                  <Pencil className="w-4 h-4" /> 重命名
                 </div>
                 <div className="context-menu-item danger" onClick={handleDelete}>
-                  🗑️ 删除
+                  <Trash2 className="w-4 h-4" /> 删除
                 </div>
               </>
             ) : (
               <>
                 <div className="context-menu-item" onClick={handleRefresh}>
-                  🔄 刷新
+                  <RefreshCw className="w-4 h-4" /> 刷新
                 </div>
                 <div className="context-menu-item" onClick={() => { setShowNewFolder(true); closeContextMenu(); }}>
-                  📁+ 新建文件夹
+                  <FolderPlus className="w-4 h-4" /> 新建文件夹
                 </div>
                 <div className="context-menu-item" onClick={() => { setShowNewFile(true); closeContextMenu(); }}>
-                  📄+ 新建文件
+                  <FilePlus className="w-4 h-4" /> 新建文件
                 </div>
               </>
             )}
