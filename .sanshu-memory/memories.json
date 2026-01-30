@@ -9,6 +9,70 @@
       "category": "Pattern",
       "created_at": "2026-01-28T05:49:30.985011800Z",
       "updated_at": "2026-01-28T05:49:30.985011800Z"
+    },
+    {
+      "id": "e180cbf0-cbaf-45da-88b0-9510d2c39bad",
+      "content": "Modified FileExplorer to support creating new files in addition to folders. Added backend SFTP create_file support.",
+      "content_normalized": "modified fileexplorer to support creating new files in addition to folders added backend sftp create_file support",
+      "category": "Context",
+      "created_at": "2026-01-30T01:53:10.345512300Z",
+      "updated_at": "2026-01-30T01:53:10.345512300Z"
+    },
+    {
+      "id": "8d4294f0-1471-4b5a-af79-1048301da095",
+      "content": "Added SFTP file editing (dbl-click to edit) with 10MB limit and UTF-8 check. Implemented via straightforward overlay editor in FileExplorer.",
+      "content_normalized": "added sftp file editing dbl-click to edit with 10mb limit and utf-8 check implemented via straightforward overlay editor in fileexplorer",
+      "category": "Context",
+      "created_at": "2026-01-30T01:58:12.443516800Z",
+      "updated_at": "2026-01-30T01:58:12.443516800Z"
+    },
+    {
+      "id": "1a9fb4c4-8a6a-4bac-bb86-64f21c4e07b4",
+      "content": "Refactored SFTP editing to use a new Tauri WebviewWindow (?mode=editor) instead of an overlay. Removed Overlay UI from FileExplorer.",
+      "content_normalized": "refactored sftp editing to use a new tauri webviewwindow mode=editor instead of an overlay removed overlay ui from fileexplorer",
+      "category": "Context",
+      "created_at": "2026-01-30T02:02:28.141000300Z",
+      "updated_at": "2026-01-30T02:02:28.141000300Z"
+    },
+    {
+      "id": "32c94703-d2a3-47ae-b214-7063e853db4b",
+      "content": "Terminal refactoring: Implemented backend MPSC buffering (60Hz) and frontend optimization with useShallow/React.memo to handle high-frequency SSH output and prevent UI freezing.",
+      "content_normalized": "terminal refactoring implemented backend mpsc buffering 60hz and frontend optimization with useshallow/reactmemo to handle high-frequency ssh output and prevent ui freezing",
+      "category": "Pattern",
+      "created_at": "2026-01-30T03:06:49.106726400Z",
+      "updated_at": "2026-01-30T03:06:49.106726400Z"
+    },
+    {
+      "id": "aa34c268-5311-4bef-97a0-014253e8fa5e",
+      "content": "Next.js / Frontend optimization: Use `useShallow` from `zustand/react/shallow` for selectors that return objects/arrays to avoid re-renders. Wrap heavy components in `React.memo`.",
+      "content_normalized": "nextjs / frontend optimization use `useshallow` from `zustand/react/shallow` for selectors that return objects/arrays to avoid re-renders wrap heavy components in `reactmemo`",
+      "category": "Rule",
+      "created_at": "2026-01-30T03:06:51.386313600Z",
+      "updated_at": "2026-01-30T03:06:51.386313600Z"
+    },
+    {
+      "id": "e9cebc53-e74d-4d36-b716-193b15c9ebf3",
+      "content": "Zustand v5: Use `useStoreWithEqualityFn` from `zustand/traditional` for custom equality selectors, as `useStore` no longer supports the equalityFn argument.",
+      "content_normalized": "zustand v5 use `usestorewithequalityfn` from `zustand/traditional` for custom equality selectors as `usestore` no longer supports the equalityfn argument",
+      "category": "Rule",
+      "created_at": "2026-01-30T03:19:48.499282200Z",
+      "updated_at": "2026-01-30T03:19:48.499282200Z"
+    },
+    {
+      "id": "6ef0b933-6330-4012-accd-9f7dfcf7fea3",
+      "content": "Terminal Performance: Completely decouple React view from high-frequency data streams (buffers) by using custom equality selectors in Zustand or memoizing components to ignore data-only updates. Let the terminal library (xterm.js) handle the rendering imperatively.",
+      "content_normalized": "terminal performance completely decouple react view from high-frequency data streams buffers by using custom equality selectors in zustand or memoizing components to ignore data-only updates let the terminal library xtermjs handle the rendering imperatively",
+      "category": "Pattern",
+      "created_at": "2026-01-30T03:19:50.602528900Z",
+      "updated_at": "2026-01-30T03:19:50.602528900Z"
+    },
+    {
+      "id": "3228c0c6-4da1-408a-9e60-f91e7e30f953",
+      "content": "Dependency Management: When using `zustand/traditional` for `useStoreWithEqualityFn`, ensure `use-sync-external-store` is explicitly installed in dependencies, as it is a required peer dependency.",
+      "content_normalized": "dependency management when using `zustand/traditional` for `usestorewithequalityfn` ensure `use-sync-external-store` is explicitly installed in dependencies as it is a required peer dependency",
+      "category": "Rule",
+      "created_at": "2026-01-30T03:23:39.265965300Z",
+      "updated_at": "2026-01-30T03:23:39.265965300Z"
     }
   ],
   "last_dedup_at": "2026-01-28T02:35:45.083562800Z",

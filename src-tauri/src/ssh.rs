@@ -2,28 +2,30 @@
 //!
 //! 使用 russh 库实现 SSH 连接，支持密码和密钥认证
 //! 通过 PTY 伪终端提供交互式 shell 体验
+//!
+//! ## 架构设计（简化版）
+//! - 后端缓冲任务以固定间隔（50ms）发射数据
+//! - 写入操作通过 MPSC Channel 解耦，避免锁竞争
 
 use russh::client::{self, AuthResult};
 use russh::keys::PrivateKeyWithHashAlg;
-use russh::{Channel, ChannelId};
-// 使用 russh 内部重新导出的 ssh_key 类型
+use russh::{ChannelId, ChannelMsg, ChannelWriteHalf};
 use russh::keys::ssh_key::PrivateKey;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::models::{AuthType, Server};
 
 /// SSH 客户端处理器
+/// 注意：数据接收现在通过 channel.wait() 实现，而不是 Handler 回调
 struct SshClientHandler {
     /// 会话 ID
+    #[allow(dead_code)]
     session_id: String,
-    /// Tauri 应用句柄
-    app_handle: AppHandle,
 }
 
 impl client::Handler for SshClientHandler {
@@ -34,66 +36,53 @@ impl client::Handler for SshClientHandler {
         &mut self,
         _server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
-        // 接受所有服务器密钥（生产环境应该验证）
         async { Ok(true) }
     }
 
     /// 处理从服务器接收的数据
+    /// 注意：实际数据通过 channel.wait() 接收，此回调不再使用
     fn data(
         &mut self,
         _channel: ChannelId,
-        data: &[u8],
+        _data: &[u8],
         _session: &mut client::Session,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        // 收到数据时发送到前端
-        let text = String::from_utf8_lossy(data).to_string();
-        let session_id = self.session_id.clone();
-        let app_handle = self.app_handle.clone();
-        async move {
-            let _ = app_handle.emit(&format!("ssh-output-{}", session_id), text);
-            Ok(())
-        }
+        async { Ok(()) }
     }
 
     /// 处理 stderr 数据
+    /// 注意：实际数据通过 channel.wait() 接收，此回调不再使用
     fn extended_data(
         &mut self,
         _channel: ChannelId,
         _ext: u32,
-        data: &[u8],
+        _data: &[u8],
         _session: &mut client::Session,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        // stderr 数据也发送到前端
-        let text = String::from_utf8_lossy(data).to_string();
-        let session_id = self.session_id.clone();
-        let app_handle = self.app_handle.clone();
-        async move {
-            let _ = app_handle.emit(&format!("ssh-output-{}", session_id), text);
-            Ok(())
-        }
+        async { Ok(()) }
     }
 }
 
-/// SSH 会话数据
+/// SSH 会话数据（用于 resize 和 disconnect）
 struct SshSessionData {
-    /// 通道句柄
-    channel: Channel<client::Msg>,
-    /// 是否正在运行
+    /// 写端 channel，用于发送 resize 和 eof 命令
+    write_half: Arc<Mutex<ChannelWriteHalf<client::Msg>>>,
     running: Arc<RwLock<bool>>,
+    // 保存 session 句柄，防止被 drop 导致事件循环停止
+    #[allow(dead_code)]
+    session_handle: client::Handle<SshClientHandler>,
 }
 
-/// SSH 会话元数据
+/// SSH 会话元数据（简化版，无回压）
 struct SshSessionMeta {
-    /// 服务器名称
     #[allow(dead_code)]
     server_name: String,
-    /// 会话数据
     session_data: Arc<Mutex<Option<SshSessionData>>>,
+    write_tx: mpsc::UnboundedSender<String>,
 }
 
 /// SSH 会话管理器
 pub struct SshManager {
-    /// 活跃会话映射: session_id -> SshSessionMeta
     sessions: Mutex<HashMap<String, SshSessionMeta>>,
 }
 
@@ -110,16 +99,13 @@ impl SshManager {
         let key_data = std::fs::read_to_string(path)
             .map_err(|e| format!("读取私钥文件失败: {:?}", e))?;
         
-        // 尝试解析私钥
-        if let Some(pass) = passphrase {
-            // 尝试用密码解密加密的私钥
+        if let Some(_pass) = passphrase {
             PrivateKey::from_openssh(key_data.as_bytes())
                 .map_err(|e| format!("解析私钥失败: {:?}", e))
                 .and_then(|k| {
                     if k.is_encrypted() {
-                        // 如果密钥已加密，需要解密
                         PrivateKey::from_openssh(key_data.as_bytes())
-                            .map_err(|e| format!("解密私钥失败（可能密码错误）: {:?}", e))
+                            .map_err(|e| format!("解密私钥失败: {:?}", e))
                     } else {
                         Ok(k)
                     }
@@ -130,7 +116,7 @@ impl SshManager {
         }
     }
 
-    /// 建立 SSH 连接（异步版本）
+    /// 建立 SSH 连接
     pub async fn connect_async(
         &self,
         session_id: &str,
@@ -139,17 +125,68 @@ impl SshManager {
     ) -> Result<(), String> {
         println!("[SSH] 开始连接 session_id={}, server={}", session_id, server.name);
 
-        // 创建 SSH 配置
         let config = client::Config {
             inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
             ..Default::default()
         };
         let config = Arc::new(config);
 
+        // 创建数据缓冲通道
+        let (data_tx, mut data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        
+        // 启动后台缓冲任务（极简版：50ms 间隔发射）
+        let app_handle_clone = app_handle.clone();
+        let session_id_clone = session_id.to_string();
+        
+        tokio::spawn(async move {
+            let mut buffer: Vec<u8> = Vec::with_capacity(64 * 1024);
+            // 50ms 间隔，每秒约 20 次，足够流畅且减少 IPC 开销
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if !buffer.is_empty() {
+                            let text = String::from_utf8_lossy(&buffer).to_string();
+                            if app_handle_clone.emit(&format!("ssh-output-{}", session_id_clone), text).is_err() {
+                                break;
+                            }
+                            buffer.clear();
+                        }
+                    }
+                    recv_result = data_rx.recv() => {
+                        match recv_result {
+                            Some(data) => {
+                                buffer.extend_from_slice(&data);
+                                
+                                // 缓冲超过 64KB 时立即发送
+                                if buffer.len() > 64 * 1024 {
+                                    let text = String::from_utf8_lossy(&buffer).to_string();
+                                    if app_handle_clone.emit(&format!("ssh-output-{}", session_id_clone), text).is_err() {
+                                        break;
+                                    }
+                                    buffer.clear();
+                                }
+                            }
+                            None => {
+                                // 通道关闭，发送剩余数据
+                                if !buffer.is_empty() {
+                                    let text = String::from_utf8_lossy(&buffer).to_string();
+                                    let _ = app_handle_clone.emit(&format!("ssh-output-{}", session_id_clone), text);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+
         // 创建客户端处理器
         let handler = SshClientHandler {
             session_id: session_id.to_string(),
-            app_handle: app_handle.clone(),
         };
 
         // 建立连接
@@ -176,18 +213,12 @@ impl SshManager {
                 let key_path = server.private_key_path.as_ref()
                     .ok_or("密钥认证需要提供私钥路径")?;
                 
-                // 加载私钥
-                let private_key = Self::load_private_key(
-                    key_path, 
-                    server.password.as_deref()
-                )?;
+                let private_key = Self::load_private_key(key_path, server.password.as_deref())?;
                 
-                // 获取最佳支持的 RSA 哈希算法（如果是 RSA 密钥）
                 let hash_alg = session.best_supported_rsa_hash().await
                     .map_err(|e| format!("获取 RSA 哈希算法失败: {:?}", e))?
                     .flatten();
                 
-                // 创建带哈希算法的私钥包装
                 let key_with_hash = PrivateKeyWithHashAlg::new(
                     Arc::new(private_key),
                     hash_alg
@@ -200,7 +231,6 @@ impl SshManager {
             }
         };
 
-        // 检查认证结果
         match auth_result {
             AuthResult::Success => {
                 println!("[SSH] 认证成功，正在打开通道...");
@@ -210,7 +240,6 @@ impl SshManager {
             }
         }
 
-        // 打开通道
         let channel = session
             .channel_open_session()
             .await
@@ -218,7 +247,6 @@ impl SshManager {
 
         println!("[SSH] 通道已打开，正在请求 PTY...");
 
-        // 请求 PTY
         channel
             .request_pty(
                 false,
@@ -234,7 +262,6 @@ impl SshManager {
 
         println!("[SSH] PTY 请求成功，正在启动 shell...");
 
-        // 启动 shell
         channel
             .request_shell(false)
             .await
@@ -243,24 +270,95 @@ impl SshManager {
         println!("[SSH] Shell 启动成功");
 
         let running = Arc::new(RwLock::new(true));
+        let (write_tx, mut write_rx) = mpsc::unbounded_channel::<String>();
 
-        // 存储会话数据
+        // 使用 split() 分离 channel 的读写端，允许并发操作
+        let (mut read_half, write_half) = channel.split();
+        let shared_write_half = Arc::new(Mutex::new(write_half));
+
+        // === 读取任务：驱动 SSH 事件循环并接收数据 ===
+        let read_data_tx = data_tx.clone();
+        let read_running = running.clone();
+        let read_session_id = session_id.to_string();
+        let app_handle_for_disconnect = app_handle.clone();
+
+        tokio::spawn(async move {
+            loop {
+                // 检查是否应该停止
+                if !*read_running.read().await {
+                    break;
+                }
+                
+                // 等待 channel 消息 - 这是驱动 SSH 事件循环的关键！
+                match read_half.wait().await {
+                    Some(msg) => {
+                        match msg {
+                            ChannelMsg::Data { data } => {
+                                // 将接收到的数据发送到缓冲通道
+                                if read_data_tx.send(data.to_vec()).is_err() {
+                                    break;
+                                }
+                            }
+                            ChannelMsg::ExtendedData { data, .. } => {
+                                // stderr 数据也发送到同一通道
+                                let _ = read_data_tx.send(data.to_vec());
+                            }
+                            ChannelMsg::Eof | ChannelMsg::Close => {
+                                break;
+                            }
+                            _ => {
+                                // 其他消息类型（如 WindowAdjust, ExitStatus）可以忽略
+                            }
+                        }
+                    }
+                    None => {
+                        // channel 关闭
+                        break;
+                    }
+                }
+            }
+            
+            // 通知前端连接已断开
+            let _ = app_handle_for_disconnect.emit(&format!("ssh-disconnected-{}", read_session_id), "连接已关闭");
+        });
+
+
+        // === 写入任务：处理用户输入 ===
+        let write_channel = shared_write_half.clone();
+        let session_id_clone = session_id.to_string();
+        let running_clone = running.clone();
+
+        tokio::spawn(async move {
+            println!("[SSH] 写入任务启动 session={}", session_id_clone);
+            while let Some(data) = write_rx.recv().await {
+                if !*running_clone.read().await {
+                    break;
+                }
+                let write_half = write_channel.lock().await;
+                if let Err(_e) = write_half.data(data.as_bytes()).await {
+                    break;
+                }
+            }
+        });
+
         let session_data = Arc::new(Mutex::new(Some(SshSessionData {
-            channel,
+            write_half: shared_write_half,
             running: running.clone(),
+            session_handle: session,  // 保存 session，防止被 drop
         })));
 
-        // 存储会话元数据
         {
             let mut sessions = self.sessions.lock().await;
             sessions.insert(session_id.to_string(), SshSessionMeta {
                 server_name: server.name.clone(),
                 session_data,
+                write_tx,
             });
         }
 
         Ok(())
     }
+
 
     /// 发送数据到 SSH 会话
     pub async fn write(&self, session_id: &str, data: &str) -> Result<(), String> {
@@ -269,14 +367,11 @@ impl SshManager {
         let session_meta = sessions.get(session_id)
             .ok_or("会话不存在")?;
         
-        let session_data = session_meta.session_data.lock().await;
-        if let Some(ref data_inner) = *session_data {
-            data_inner.channel
-                .data(data.as_bytes())
-                .await
-                .map_err(|e| format!("发送数据失败: {:?}", e))?;
-        }
+        session_meta.write_tx
+            .send(data.to_string())
+            .map_err(|e| format!("发送数据失败: {:?}", e))?;
         
+        println!("[SSH] write 完成 session={}", session_id);
         Ok(())
     }
 
@@ -289,7 +384,8 @@ impl SshManager {
         
         let session_data = session_meta.session_data.lock().await;
         if let Some(ref data) = *session_data {
-            data.channel
+            let write_half = data.write_half.lock().await;
+            write_half
                 .window_change(cols, rows, 0, 0)
                 .await
                 .map_err(|e| format!("调整终端大小失败: {:?}", e))?;
@@ -306,8 +402,8 @@ impl SshManager {
             let mut session_data = session_meta.session_data.lock().await;
             if let Some(ref mut data) = *session_data {
                 *data.running.write().await = false;
-                // 尝试关闭通道
-                let _ = data.channel.eof().await;
+                let write_half = data.write_half.lock().await;
+                let _ = write_half.eof().await;
             }
         }
         

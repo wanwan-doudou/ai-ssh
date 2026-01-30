@@ -82,8 +82,7 @@ pub async fn write_ssh(
     ssh_state: State<'_, SshState>,
 ) -> Result<(), String> {
     let manager = ssh_state.manager.lock().await;
-    manager.write(&session_id, &data).await?;
-    Ok(())
+    manager.write(&session_id, &data).await
 }
 
 /// 调整终端窗口大小
@@ -95,8 +94,7 @@ pub async fn resize_ssh(
     ssh_state: State<'_, SshState>,
 ) -> Result<(), String> {
     let manager = ssh_state.manager.lock().await;
-    manager.resize(&session_id, cols, rows).await?;
-    Ok(())
+    manager.resize(&session_id, cols, rows).await
 }
 
 /// 发送 SSH 命令 (保留兼容性)
@@ -107,7 +105,6 @@ pub async fn send_ssh_command(
     ssh_state: State<'_, SshState>,
 ) -> Result<String, String> {
     let manager = ssh_state.manager.lock().await;
-    // 发送命令并添加换行符
     manager.write(&session_id, &format!("{}\n", command)).await?;
     Ok("命令已发送".to_string())
 }

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, memo } from "react";
+import { useStoreWithEqualityFn } from 'zustand/traditional';
 import { Terminal as TerminalIcon, Plus, X, Server, Bot, FolderOpen, ChevronDown, ChevronUp } from "lucide-react";
 import { useServerStore } from "@/stores/serverStore";
 import { useChatStore } from "@/stores/chatStore";
@@ -13,6 +14,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { useTerminalStore } from "@/stores/terminalStore";
 import { useThemeStore } from "@/stores/themeStore";
 import { useTerminalDirectoryStore } from "@/stores/terminalDirectoryStore";
+import { useShallow } from 'zustand/react/shallow';
 
 const darkTheme = {
   background: "#0f172a",
@@ -63,16 +65,41 @@ const lightTheme = {
   brightWhite: "#1e293b", // 深灰色 (slate-800)
 };
 
+// 自定义相等性检查函数：忽略 buffer 字段的变化
+// 只有当 id, serverId, serverName, isConnected, bufferRestored 发生变化时才触发更新
+const sessionsEquality = (prev: any[], next: any[]) => {
+  if (prev === next) return true;
+  if (prev.length !== next.length) return false;
+  return prev.every((p, i) => {
+    const n = next[i];
+    return p.id === n.id && 
+           p.serverId === n.serverId && 
+           p.serverName === n.serverName && 
+           p.isConnected === n.isConnected &&
+           p.bufferRestored === n.bufferRestored;
+  });
+};
+
 export function TerminalView() {
   const { servers, fetchServers } = useServerStore();
+  
+  // 直接获取 sessions，并使用自定义相等性检查
+  // 使用 useStoreWithEqualityFn 显式调用以支持 equalityFn 参数 (Zustand v5)
+  const sessions = useStoreWithEqualityFn(useTerminalStore, state => state.sessions, sessionsEquality);
+  
   const { 
-    sessions, 
     activeSessionId, 
     addSession, 
     removeSession, 
     setActiveSessionId,
     setSessionConnected
-  } = useTerminalStore();
+  } = useTerminalStore(useShallow(state => ({
+    activeSessionId: state.activeSessionId,
+    addSession: state.addSession,
+    removeSession: state.removeSession,
+    setActiveSessionId: state.setActiveSessionId,
+    setSessionConnected: state.setSessionConnected
+  })));
   const [showServerSelector, setShowServerSelector] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   // SFTP 面板状态
@@ -257,7 +284,7 @@ export function TerminalView() {
               {/* 终端区域 */}
               <div 
                 className="relative font-mono min-h-0" 
-                style={{ flex: showSftpPanel ? `1 1 calc(100% - ${sftpPanelHeight}px - 6px)` : '1 1 100%' }}
+                style={{ flex: showSftpPanel ? `1 1 calc(100% - ${sftpPanelHeight}px - 38px)` : '1 1 calc(100% - 32px)' }}
               >
                 {sessions.map((session) => (
                   <div
@@ -273,6 +300,7 @@ export function TerminalView() {
                   </div>
                 ))}
               </div>
+
               
               {/* SFTP 面板切换按钮 */}
               <div className="flex-shrink-0 h-8 flex items-center justify-between px-3 bg-surface-100 dark:bg-surface-900 border-t border-surface-200 dark:border-surface-800">
@@ -368,13 +396,14 @@ function EmptyTerminal({ onNewConnection }: { onNewConnection: () => void }) {
 }
 
 interface TerminalInstanceProps {
-  session: any; // 使用 store 中的扩展类型，这里暂时用 any 或需要导出类型
+  session: any; // 这里的 session 实际上只包含 id, serverId, serverName 等基本字段
   onConnected: () => void;
   onDisconnected: () => void;
-  onDirectoryChange?: (directory: string) => void; // 目录变化回调
+  onDirectoryChange?: (directory: string) => void;
 }
 
-function TerminalInstance({ session, onConnected, onDisconnected, onDirectoryChange }: TerminalInstanceProps) {
+// 使用 memo 避免不必要的重渲染
+const TerminalInstance = memo(function TerminalInstance({ session, onConnected, onDisconnected, onDirectoryChange }: TerminalInstanceProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstanceRef = useRef<any>(null);
   const fitAddonRef = useRef<any>(null);
@@ -450,6 +479,38 @@ function TerminalInstance({ session, onConnected, onDisconnected, onDirectoryCha
     }
   }, [theme]);
 
+  // 存储同步引用 - 用于将数据懒加载同步到 Zustand store
+  const storeBufferRef = useRef<string>('');
+  const lastSyncTimeRef = useRef<number>(Date.now());
+
+  // 同步数据到 Store 的函数
+  const syncToStore = useCallback(() => {
+    if (!storeBufferRef.current) return;
+    
+    const dataToSync = storeBufferRef.current;
+    storeBufferRef.current = '';
+    lastSyncTimeRef.current = Date.now();
+    
+    // 批量更新 Store
+    appendOutput(session.id, dataToSync);
+    appendSessionOutput(session.id, dataToSync);
+  }, [session.id, appendOutput, appendSessionOutput]);
+
+  // 定时同步 Store (每 2 秒)
+  useEffect(() => {
+    const syncInterval = setInterval(() => {
+      if (storeBufferRef.current) {
+        syncToStore();
+      }
+    }, 2000);
+    
+    return () => {
+      clearInterval(syncInterval);
+      // 组件卸载或会话改变时，强制同步剩余数据
+      syncToStore();
+    };
+  }, [syncToStore]);
+
   useEffect(() => {
     let unlistenOutput: UnlistenFn | null = null;
     let unlistenDisconnect: UnlistenFn | null = null;
@@ -461,6 +522,7 @@ function TerminalInstance({ session, onConnected, onDisconnected, onDirectoryCha
       const { Terminal } = await import("@xterm/xterm");
       const { FitAddon } = await import("@xterm/addon-fit");
       const { WebLinksAddon } = await import("@xterm/addon-web-links");
+      const { WebglAddon } = await import("@xterm/addon-webgl");
       
       await import("@xterm/xterm/css/xterm.css");
 
@@ -482,6 +544,24 @@ function TerminalInstance({ session, onConnected, onDisconnected, onDirectoryCha
       terminal.loadAddon(new WebLinksAddon());
 
       terminal.open(terminalRef.current);
+      
+      // 临时禁用 WebGL 渲染器进行调试
+      // WebGL 可能导致高频数据渲染后上下文卡死
+      /*
+      try {
+        const webglAddon = new WebglAddon();
+        webglAddon.onContextLoss(() => {
+          console.warn('[Terminal] WebGL 上下文丢失，回退到 Canvas 渲染');
+          webglAddon.dispose();
+        });
+        terminal.loadAddon(webglAddon);
+        console.log('[Terminal] WebGL 渲染器加载成功');
+      } catch (e) {
+        console.warn('[Terminal] WebGL 不可用，使用默认渲染器:', e);
+      }
+      */
+      console.log('[Terminal] 使用默认 Canvas 渲染器');
+      
       fitAddon.fit();
 
       terminalInstanceRef.current = terminal;
@@ -494,8 +574,11 @@ function TerminalInstance({ session, onConnected, onDisconnected, onDirectoryCha
 
       // 如果有缓存的输出且尚未恢复过，先恢复显示
       // 使用 store 中的 bufferRestored 状态来追踪，避免页面切换时重复恢复
-      if (session.buffer && !session.bufferRestored) {
-        terminal.write(session.buffer);
+      // 从 store 获取完整的 session 数据（包含 buffer）
+      const currentSessionState = useTerminalStore.getState().sessions.find(s => s.id === session.id);
+      
+      if (currentSessionState && currentSessionState.buffer && !session.bufferRestored) {
+        terminal.write(currentSessionState.buffer);
         // 标记 buffer 已恢复，防止再次恢复
         setBufferRestored(session.id, true);
       }
@@ -530,18 +613,22 @@ function TerminalInstance({ session, onConnected, onDisconnected, onDirectoryCha
       // 监听来自后端的 SSH 输出
       unlistenOutput = await listen<string>(`ssh-output-${session.id}`, (event) => {
         if (terminal) {
-          terminal.write(event.payload);
-          // 1. 存入 AI 分析缓冲区
-          appendOutput(session.id, event.payload);
-          // 2. 存入会话恢复缓冲区
-          appendSessionOutput(session.id, event.payload);
-          // 3. 检测目录变化并同步 SFTP
-          const newDir = parseAndUpdateFromOutput(session.id, event.payload);
-          if (newDir && onDirectoryChange) {
-            onDirectoryChange(newDir);
+          const data = event.payload;
+          
+          // 1. 写入终端
+          terminal.write(data);
+          
+          // 2. 累积到 Store 缓冲区（延迟同步）
+          storeBufferRef.current += data;
+          
+          // 3. 检测目录变化（如 cd 命令）
+          const detectedDir = parseAndUpdateFromOutput(session.id, data);
+          if (detectedDir && onDirectoryChange) {
+            onDirectoryChange(detectedDir);
           }
         }
       });
+
 
       // 监听断开连接事件
       unlistenDisconnect = await listen<string>(`ssh-disconnected-${session.id}`, (event) => {
@@ -654,4 +741,4 @@ function TerminalInstance({ session, onConnected, onDisconnected, onDirectoryCha
   return (
     <div ref={terminalRef} className="terminal-container h-full" />
   );
-}
+});

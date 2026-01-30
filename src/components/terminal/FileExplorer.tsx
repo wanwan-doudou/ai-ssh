@@ -50,6 +50,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
     refreshFiles,
     changeDir,
     mkdir,
+    createFile,
     remove,
     rename,
     downloadToFile,
@@ -65,9 +66,16 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
   const [newName, setNewName] = useState('');
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  const [showNewFile, setShowNewFile] = useState(false);
+  const [newFileName, setNewFileName] = useState('');
   const [isDragOver, setIsDragOver] = useState(false);
   const [treeWidth, setTreeWidth] = useState(250);
   const [pathInput, setPathInput] = useState('');
+  
+  // 移除内部编辑器状态
+  // const [editingFile, setEditingFile] = useState<{ path: string; content: string } | null>(null);
+  // const [isSaving, setIsSaving] = useState(false);
+  // const [isLoadingFile, setIsLoadingFile] = useState(false);
 
   // 同步当前目录到输入框
   useEffect(() => {
@@ -218,12 +226,33 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
   }, [sessionId, session?.connected, session?.currentDir, addTask, updateProgress, setTaskStatus, setTaskSpeed, uploadFromFile, refreshFiles]);
 
 
-  // 处理双击进入目录
-  const handleDoubleClick = useCallback((file: FileEntry) => {
+  // 处理双击
+  const handleDoubleClick = useCallback(async (file: FileEntry) => {
     if (file.is_dir) {
       changeDir(sessionId, file.path);
+    } else {
+      // 打开新窗口进行编辑
+      const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+      
+      const fileName = file.name;
+      const windowLabel = `editor-${sessionId}-${Date.now()}`;
+      
+      // 构建 URL
+      const url = `index.html?mode=editor&sessionId=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(file.path)}`;
+      
+      new WebviewWindow(windowLabel, {
+        url,
+        title: `${fileName} - 编辑器`,
+        width: 800,
+        height: 600,
+        center: true,
+      });
+      console.log('打开编辑器窗口:', windowLabel, url);
     }
   }, [sessionId, changeDir]);
+
+  // 移除旧的保存和关闭方法
+
 
   // 返回上一级目录
   const handleGoUp = useCallback(() => {
@@ -302,6 +331,20 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
       alert(`创建文件夹失败: ${error}`);
     }
   }, [sessionId, session, newFolderName, mkdir]);
+  
+  // 创建新文件
+  const handleCreateFile = useCallback(async () => {
+    if (!newFileName || !session) return;
+
+    const newPath = `${session.currentDir}/${newFileName}`;
+    try {
+      await createFile(sessionId, newPath);
+      setShowNewFile(false);
+      setNewFileName('');
+    } catch (error) {
+      alert(`创建文件失败: ${error}`);
+    }
+  }, [sessionId, session, newFileName, createFile]);
 
   // 下载文件（使用保存对话框和传输进度）
   
@@ -437,6 +480,9 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
     );
   }
 
+  // 移除加载遮罩
+
+
   // 错误状态不再阻塞整个视图
   // if (session.error) { ... }
 
@@ -506,7 +552,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
       />
 
       {/* 右侧：原有内容 (包裹在 flex-col 容器中) */}
-      <div className="flex-1 flex flex-col min-w-0 bg-surface-50 dark:bg-surface-900/30">
+      <div className="relative flex-1 flex flex-col min-w-0 bg-surface-50 dark:bg-surface-900/30">
         {/* 工具栏 */}
         <div className="file-explorer-toolbar">
           <button onClick={handleGoUp} title="返回上级目录" disabled={session.currentDir === '/'}>
@@ -516,7 +562,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
             🔄 刷新
           </button>
           <button onClick={() => setShowNewFolder(true)} title="新建文件夹">
-            📁+ 新建
+            📁+ 文件夹
+          </button>
+          <button onClick={() => setShowNewFile(true)} title="新建文件">
+            📄+ 文件
           </button>
           <div className="flex-1 ml-3 relative group">
             <input 
@@ -566,6 +615,28 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
             />
             <button onClick={handleCreateFolder}>确定</button>
             <button onClick={() => { setShowNewFolder(false); setNewFolderName(''); }}>取消</button>
+          </div>
+        )}
+
+        {/* 新建文件对话框 */}
+        {showNewFile && (
+          <div className="new-folder-dialog">
+            <input
+              type="text"
+              value={newFileName}
+              onChange={(e) => setNewFileName(e.target.value)}
+              placeholder="文件名 (例如: test.txt)"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCreateFile();
+                if (e.key === 'Escape') {
+                  setShowNewFile(false);
+                  setNewFileName('');
+                }
+              }}
+            />
+            <button onClick={handleCreateFile}>确定</button>
+            <button onClick={() => { setShowNewFile(false); setNewFileName(''); }}>取消</button>
           </div>
         )}
 
@@ -665,6 +736,9 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                 <div className="context-menu-item" onClick={() => { setShowNewFolder(true); closeContextMenu(); }}>
                   📁+ 新建文件夹
                 </div>
+                <div className="context-menu-item" onClick={() => { setShowNewFile(true); closeContextMenu(); }}>
+                  📄+ 新建文件
+                </div>
               </>
             )}
           </div>
@@ -676,6 +750,8 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
           <span>|</span>
           <span>{selectedFiles.size} 已选择</span>
         </div>
+
+        {/* 移除文件编辑器覆盖层 */}
       </div>
     </div>
   );

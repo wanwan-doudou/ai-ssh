@@ -188,6 +188,17 @@ pub async fn sftp_mkdir(
     manager.mkdir(&session_id, &path).await
 }
 
+/// 创建空文件
+#[tauri::command]
+pub async fn sftp_create_file(
+    state: State<'_, SftpState>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    let manager = &state.manager;
+    manager.create_file(&session_id, &path).await
+}
+
 /// 删除文件或目录
 #[tauri::command]
 pub async fn sftp_remove(
@@ -263,6 +274,34 @@ pub async fn sftp_upload_from_file(
         task_id.as_deref(),
         Some(app),
     ).await
+}
+
+
+/// 读取文件内容
+#[tauri::command]
+pub async fn sftp_read_file(
+    state: State<'_, SftpState>,
+    session_id: String,
+    path: String,
+) -> Result<String, String> {
+    let manager = &state.manager;
+    let content = manager.read_file(&session_id, &path).await?;
+    
+    // 尝试转为 UTF-8 String
+    String::from_utf8(content)
+        .map_err(|e| format!("文件不是有效的文本文件 (UTF-8 解析失败): {:?}", e))
+}
+
+/// 写入文件内容
+#[tauri::command]
+pub async fn sftp_write_file(
+    state: State<'_, SftpState>,
+    session_id: String,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let manager = &state.manager;
+    manager.write_file(&session_id, &path, content.as_bytes()).await
 }
 
 /// 断开 SFTP 会话

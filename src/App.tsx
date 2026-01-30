@@ -2,10 +2,20 @@ import { useState, useEffect } from "react";
 import { Sidebar } from "./components/layout/Sidebar";
 import { MainContent } from "./components/layout/MainContent";
 import { useThemeStore } from "./stores/themeStore";
+import { FileEditorWindow } from "./components/editor/FileEditorWindow";
 
 function App() {
   const [activeView, setActiveView] = useState<"servers" | "providers" | "terminal">("servers");
   const { theme } = useThemeStore();
+  const [isEditorMode, setIsEditorMode] = useState(false);
+
+  useEffect(() => {
+    // 检查 URL 参数是否为编辑器模式
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('mode') === 'editor') {
+      setIsEditorMode(true);
+    }
+  }, []);
 
   useEffect(() => {
     if (theme === 'dark') {
@@ -14,6 +24,11 @@ function App() {
       document.documentElement.classList.remove('dark');
     }
   }, [theme]);
+
+  // 如果是编辑器模式，渲染独立编辑器窗口
+  if (isEditorMode) {
+    return <FileEditorWindow />;
+  }
 
   // Using bg-surface-50 for light mode (clean look) and bg-surface-950 for dark mode
   return (

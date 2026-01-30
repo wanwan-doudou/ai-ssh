@@ -1,129 +1,98 @@
-# AI-SSH Terminal
+# AI-SSH Terminal 🚀
 
-智能 SSH 终端桌面应用，集成 AI 辅助功能。通过自然语言与 AI 交互，AI 会理解用户意图并生成相应的 Shell 命令，降低服务器运维门槛。
+智能 SSH 终端桌面应用，深度集成 AI 辅助功能与全功能 SFTP 文件管理。通过自然语言与 AI 交互，降低运维门槛；同时提供高效的远程文件管理体验，实现终端与文件系统的无缝协同。
 
-## 功能特性
+## ✨ 核心特性
 
-### SSH 服务器管理
-- 添加、编辑、删除 SSH 服务器配置
-- 支持 **密码认证** 和 **私钥认证** 两种方式
-- 服务器分组管理
-- 数据持久化到 SQLite 数据库
+### 📁 SFTP 文件管理系统 (New)
+- **可视化文件浏览**：直观的树形目录结构，支持文件/文件夹的展开与折叠。
+- **高性能传输**：优化的文件传输算法，支持大文件和批量小文件的高速上传/下载。
+- **拖拽上传**：支持直接从 Windows 资源管理器拖拽文件到应用窗口进行上传。
+- **任务管理**：实时的文件传输队列，显示传输进度、速度和状态。
+- **终端同步**：
+  - **自动跟随**：在终端执行 `cd` 命令时，文件管理器自动跳转到对应目录。
+  - **分屏视图**：支持终端与文件管理器的自适应分屏显示，提升工作效率。
 
-### AI Provider 配置
-- 支持多种 AI 服务商：Claude、OpenAI、Codex、Gemini、Custom
-- 可配置 API Key、Base URL、模型名称
-- 连接测试功能
-- 可设置活跃的 Provider
+### 🤖 AI 智能助手
+- **上下文感知**：AI 能够分析当前终端的输出内容、错误日志，提供精准的命令建议。
+- **自然语言交互**：通过对话面板描述需求（如"查看 Nginx 日志"），AI 自动生成 Shell 命令。
+- **双模式执行**：
+  - **确认模式**：AI 建议需人工确认（安全优先）。
+  - **自动模式**：AI 直接执行低风险命令（效率优先）。
+- **多模型支持**：兼容 Claude, OpenAI, Gemini 等主流 AI 模型，支持自定义 API。
 
-### 内嵌终端
-- 基于 xterm.js 的终端模拟器
-- 多标签页支持（多会话）
-- 通过 russh 实现真正的 SSH 连接
-- PTY 伪终端，完整的交互式 Shell 体验
-- 终端大小自适应调整
-- 明暗主题切换
+### 🖥️ 专业级 SSH 终端
+- **全功能模拟器**：基于 xterm.js，支持真彩显示、PTY 伪终端交互。
+- **会话管理**：支持多标签页、服务器分组管理。
+- **多种认证**：支持密码认证和 SSH Key 私钥认证。
+- **个性化**：支持明暗主题切换，终端字体大小自适应。
 
-### AI 辅助功能
-- 右侧 AI 对话面板，与 AI 助手交互
-- AI 分析终端输出并建议命令
-- 两种操作模式：
-  - **确认模式**：AI 建议命令后需用户确认才执行
-  - **自动模式**：AI 直接执行命令到终端
-- 流式响应（实时显示 AI 回复）
-- AI 自动分析命令执行结果并给出反馈
+## 🛠️ 技术栈
 
-## 技术栈
+| 领域 | 技术方案 |
+|------|----------|
+| **Core** | [Tauri v2](https://tauri.app) (Rust) |
+| **Frontend** | React 18 + TypeScript |
+| **UI Framework** | Tailwind CSS 3.4 + Luside Icons |
+| **State Management** | Zustand 5 |
+| **Terminal** | xterm.js 5.5 |
+| **SSH/SFTP** | russh (Rust SSH client) |
+| **Database** | SQLite (rusqlite) |
+| **Build Tool** | Vite 6 |
 
-| 层级 | 技术 |
-|------|------|
-| 前端框架 | React 18 + TypeScript |
-| 样式 | Tailwind CSS 3.4 |
-| 状态管理 | Zustand 5 |
-| 终端模拟 | xterm.js 5.5 |
-| Markdown 渲染 | react-markdown + remark-gfm |
-| 图标 | lucide-react |
-| 桌面框架 | Tauri v2 (Rust) |
-| SSH 库 | russh 0.44 |
-| 数据库 | rusqlite (SQLite) |
-| HTTP 客户端 | reqwest |
-| 加密 | aes-gcm + base64 |
-| 构建工具 | Vite 6 |
+## 🚀 快速开始
 
-## 快速开始
-
-### 环境要求
-
+### 环境准备
 - Node.js 18+
 - pnpm
-- Rust (安装 rustup)
+- Rust (建议通过 rustup 安装最新 stable 版本)
 
 ### 安装依赖
-
 ```bash
 pnpm install
 ```
 
-### 开发模式
-
+### 启动开发环境
 ```bash
 pnpm tauri dev
 ```
 
-### 构建
-
+### 构建生产包
 ```bash
 pnpm tauri build
 ```
 
-## 项目结构
+## 📂 项目结构概览
 
 ```
 ai-ssh/
 ├── src/                          # React 前端源码
-│   ├── main.tsx                  # 应用入口
-│   ├── App.tsx                   # 主应用组件
 │   ├── components/               # UI 组件
-│   │   ├── layout/               # 布局组件
-│   │   │   ├── Sidebar.tsx       # 侧边栏导航
-│   │   │   └── MainContent.tsx   # 主内容区
+│   │   ├── terminal/             # 终端核心模块
+│   │   │   ├── TerminalView.tsx  # 终端主视图 (含分屏逻辑)
+│   │   │   ├── FileExplorer.tsx  # SFTP 文件管理器
+│   │   │   └── AiChatPanel.tsx   # AI 助手面板
 │   │   ├── servers/              # 服务器管理
-│   │   │   ├── ServerList.tsx    # 服务器列表
-│   │   │   └── ServerForm.tsx    # 服务器表单
-│   │   ├── providers/            # AI Provider 管理
-│   │   │   ├── ProviderList.tsx  # Provider 列表
-│   │   │   └── ProviderForm.tsx  # Provider 表单
-│   │   └── terminal/             # 终端相关
-│   │       ├── TerminalView.tsx  # 终端视图 (多标签页)
-│   │       └── AiChatPanel.tsx   # AI 对话面板
-│   ├── stores/                   # Zustand 状态管理
-│   │   ├── serverStore.ts        # 服务器状态
-│   │   ├── providerStore.ts      # AI Provider 状态
-│   │   ├── terminalStore.ts      # 终端会话状态
-│   │   ├── chatStore.ts          # AI 对话状态
-│   │   └── themeStore.ts         # 主题状态
-│   ├── types/                    # TypeScript 类型定义
-│   └── lib/                      # 工具函数
+│   │   └── providers/            # AI 模型配置
+│   ├── stores/                   # 状态管理 (Zustand)
+│   │   ├── sftpStore.ts          # SFTP 文件系统状态
+│   │   ├── transferStore.ts      # 文件传输任务/进度
+│   │   ├── terminalStore.ts      # 终端会话核心状态
+│   │   ├── terminalDirectoryStore.ts # 目录同步状态
+│   │   └── chatStore.ts          # AI 上下文状态
+│   └── lib/                      # 工具库
 │
-├── src-tauri/                    # Rust 后端 (Tauri)
-│   ├── Cargo.toml                # Rust 依赖配置
-│   ├── tauri.conf.json           # Tauri 应用配置
-│   └── src/
-│       ├── main.rs               # Rust 入口
-│       ├── lib.rs                # 库入口，注册 Tauri 命令
-│       ├── models.rs             # 数据模型
-│       ├── db.rs                 # SQLite 数据库初始化
-│       ├── ssh.rs                # SSH 连接管理 (SshManager)
-│       ├── commands/             # Tauri 命令
-│       │   ├── server.rs         # 服务器 CRUD
-│       │   ├── provider.rs       # Provider CRUD + 连接测试
-│       │   ├── ssh.rs            # SSH 连接/断开/写入
-│       │   └── ai_chat.rs        # AI 对话 (流式响应)
-│       └── services/             # 业务逻辑服务
-│
-└── package.json
+├── src-tauri/                    # Rust 后端核心
+│   ├── src/
+│   │   ├── sftp.rs               # SFTP 协议实现与高性能传输逻辑
+│   │   ├── ssh.rs                # SSH 连接与会话管理
+│   │   ├── db.rs                 # SQLite 持久化层
+│   │   └── commands/             # 前端调用的 Tauri Commands
+│   │       ├── ai_chat.rs        # AI 流式对话接口
+│   │       └── ...
+│   └── tauri.conf.json           # Tauri 应用配置 (权限/窗口等)
 ```
 
-## 许可证
+## 📄 许可证
 
-MIT
+MIT License

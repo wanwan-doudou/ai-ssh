@@ -213,6 +213,21 @@ impl SftpManager {
             .map_err(|e| format!("创建目录失败: {:?}", e))
     }
 
+    /// 创建空文件
+    pub async fn create_file(&self, session_id: &str, path: &str) -> Result<(), String> {
+        let sessions = self.sessions.lock().await;
+        
+        let meta = sessions.get(session_id)
+            .ok_or("SFTP 会话不存在")?;
+
+        // 使用 create 创建文件，如果文件已存在会被截断为空
+        meta.session.create(path)
+            .await
+            .map_err(|e| format!("创建文件失败: {:?}", e))?;
+            
+        Ok(())
+    }
+
     /// 删除文件或目录
     pub async fn remove(&self, session_id: &str, path: &str, is_dir: bool) -> Result<(), String> {
         let sessions = self.sessions.lock().await;
@@ -779,6 +794,54 @@ impl SftpManager {
     }
 
 
+
+
+    /// 读取远程文件内容 (适对于文本文件)
+    pub async fn read_file(&self, session_id: &str, path: &str) -> Result<Vec<u8>, String> {
+        let mut sessions = self.sessions.lock().await;
+        // 注意：这里需要 session 的可变引用因为 open/create 需要 &self (但 session 是 struct 字段)
+        // russh-sftp 的 method 需要 &self, meta.session 是 SftpSession
+        let meta = sessions.get_mut(session_id).ok_or("SFTP 会话不存在")?;
+        
+        // 限制最大读取大小 (例如 10MB)，防止前端崩溃
+        const MAX_EDIT_SIZE: u64 = 10 * 1024 * 1024;
+        
+        // 获取文件大小
+        let file_size = meta.session.metadata(path).await
+            .map_err(|e| format!("获取文件信息失败: {:?}", e))?
+            .size.unwrap_or(0);
+            
+        if file_size > MAX_EDIT_SIZE {
+            return Err(format!("文件过大 ({} MB), 不支持在线编辑 (最大 10MB)", file_size / 1024 / 1024));
+        }
+
+        let mut file = meta.session.open(path).await
+            .map_err(|e| format!("打开文件失败: {:?}", e))?;
+            
+        let mut content = Vec::new();
+        file.read_to_end(&mut content).await
+             .map_err(|e| format!("读取文件内容失败: {:?}", e))?;
+             
+        Ok(content)
+    }
+
+    /// 写入内容到远程文件
+    pub async fn write_file(&self, session_id: &str, path: &str, content: &[u8]) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().await;
+        let meta = sessions.get_mut(session_id).ok_or("SFTP 会话不存在")?;
+        
+        // create 会截断文件
+        let mut file = meta.session.create(path).await
+            .map_err(|e| format!("创建文件失败: {:?}", e))?;
+            
+        file.write_all(content).await
+             .map_err(|e| format!("写入文件失败: {:?}", e))?;
+        
+        file.flush().await
+            .map_err(|e| format!("刷新文件失败: {:?}", e))?;
+             
+        Ok(())
+    }
 
     /// 断开 SFTP 会话
     pub async fn disconnect(&self, session_id: &str) -> Result<(), String> {

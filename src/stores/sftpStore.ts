@@ -71,6 +71,9 @@ interface SftpState {
   /** 创建目录 */
   mkdir: (sessionId: string, path: string) => Promise<void>;
   
+  /** 创建文件 */
+  createFile: (sessionId: string, path: string) => Promise<void>;
+  
   /** 删除文件或目录 */
   remove: (sessionId: string, path: string, isDir: boolean) => Promise<void>;
   
@@ -82,6 +85,12 @@ interface SftpState {
   
   /** 从本地文件上传到远程（高性能，直接读取本地文件） */
   uploadFromFile: (sessionId: string, localPath: string, remotePath: string, taskId?: string) => Promise<void>;
+  
+  /** 读取文件内容 */
+  readFile: (sessionId: string, path: string) => Promise<string>;
+  
+  /** 写入文件内容 */
+  writeFile: (sessionId: string, path: string, content: string) => Promise<void>;
   
   /** 分块上传控制 */
   cancelUpload: (sessionId: string, token: string) => Promise<void>;
@@ -295,6 +304,11 @@ export const useSftpStore = create<SftpState>((set, get) => ({
     await get().refreshFiles(sessionId);
   },
 
+  createFile: async (sessionId: string, path: string) => {
+    await invoke('sftp_create_file', { sessionId, path });
+    await get().refreshFiles(sessionId);
+  },
+
   remove: async (sessionId: string, path: string, isDir: boolean) => {
     await invoke('sftp_remove', { sessionId, path, isDir });
     await get().refreshFiles(sessionId);
@@ -321,6 +335,15 @@ export const useSftpStore = create<SftpState>((set, get) => ({
       remotePath,
       taskId: taskId ?? null,
     });
+    await get().refreshFiles(sessionId);
+  },
+
+  readFile: async (sessionId: string, path: string) => {
+    return await invoke<string>('sftp_read_file', { sessionId, path });
+  },
+
+  writeFile: async (sessionId: string, path: string, content: string) => {
+    await invoke('sftp_write_file', { sessionId, path, content });
     await get().refreshFiles(sessionId);
   },
 
