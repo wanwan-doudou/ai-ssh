@@ -80,6 +80,9 @@ interface SftpState {
   /** 重命名 */
   rename: (sessionId: string, oldPath: string, newPath: string) => Promise<void>;
   
+  /** 修改权限 */
+  chmod: (sessionId: string, path: string, mode: number) => Promise<void>;
+  
   /** 下载文件到本地路径（高性能） */
   downloadToFile: (sessionId: string, remotePath: string, localPath: string, taskId?: string) => Promise<void>;
   
@@ -316,6 +319,11 @@ export const useSftpStore = create<SftpState>((set, get) => ({
 
   rename: async (sessionId: string, oldPath: string, newPath: string) => {
     await invoke('sftp_rename', { sessionId, oldPath, newPath });
+    await get().refreshFiles(sessionId);
+  },
+
+  chmod: async (sessionId: string, path: string, mode: number) => {
+    await invoke('sftp_chmod', { sessionId, path, mode });
     await get().refreshFiles(sessionId);
   },
 

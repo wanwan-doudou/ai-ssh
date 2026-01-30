@@ -85,6 +85,7 @@ pub fn run() {
             commands::sftp::sftp_create_file,
             commands::sftp::sftp_remove,
             commands::sftp::sftp_rename,
+            commands::sftp::sftp_chmod,
             commands::sftp::sftp_download_to_file,
             commands::sftp::sftp_upload_from_file,
             commands::sftp::sftp_read_file,

@@ -223,6 +223,18 @@ pub async fn sftp_rename(
     manager.rename(&session_id, &old_path, &new_path).await
 }
 
+/// 修改文件或目录权限
+#[tauri::command]
+pub async fn sftp_chmod(
+    state: State<'_, SftpState>,
+    session_id: String,
+    path: String,
+    mode: u32,
+) -> Result<(), String> {
+    let manager = &state.manager;
+    manager.chmod(&session_id, &path, mode).await
+}
+
 /// 取消上传 - 高性能上传（taskId）
 #[tauri::command]
 pub async fn sftp_cancel_upload(

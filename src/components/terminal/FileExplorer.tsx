@@ -16,8 +16,9 @@ import './FileExplorer.css';
 import { FileTree } from './FileTree';
 import { 
   ArrowUp, RefreshCw, FolderPlus, FilePlus, Folder, FileText, 
-  Download, Pencil, Trash2, XCircle, Inbox 
+  Download, Pencil, Trash2, XCircle, Inbox, Shield 
 } from 'lucide-react';
+import { ChmodModal } from './ChmodModal';
 
 interface FileExplorerProps {
   /** 会话 ID */
@@ -57,6 +58,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
     createFile,
     remove,
     rename,
+    chmod,
     downloadToFile,
     uploadFromFile, // 高性能上传（Tauri 原生拖放事件）
     // getSession, // 暂未使用
@@ -75,6 +77,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
   const [isDragOver, setIsDragOver] = useState(false);
   const [treeWidth, setTreeWidth] = useState(250);
   const [pathInput, setPathInput] = useState('');
+  const [chmodTarget, setChmodTarget] = useState<FileEntry | null>(null);
   
   // 移除内部编辑器状态
   // const [editingFile, setEditingFile] = useState<{ path: string; content: string } | null>(null);
@@ -747,6 +750,9 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                 <div className="context-menu-item" onClick={handleStartRename}>
                   <Pencil className="w-4 h-4" /> 重命名
                 </div>
+                <div className="context-menu-item" onClick={() => { setChmodTarget(contextMenu.file!); closeContextMenu(); }}>
+                  <Shield className="w-4 h-4" /> 更改权限
+                </div>
                 <div className="context-menu-item danger" onClick={handleDelete}>
                   <Trash2 className="w-4 h-4" /> 删除
                 </div>
@@ -776,6 +782,20 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
 
         {/* 移除文件编辑器覆盖层 */}
       </div>
+
+      {/* 权限修改弹窗 */}
+      <ChmodModal
+        isOpen={chmodTarget !== null}
+        onClose={() => setChmodTarget(null)}
+        onConfirm={async (mode) => {
+          if (chmodTarget) {
+            await chmod(sessionId, chmodTarget.path, mode);
+          }
+        }}
+        fileName={chmodTarget?.name ?? ''}
+        currentPermissions={chmodTarget?.permissions ?? '---------'}
+        isDir={chmodTarget?.is_dir ?? false}
+      />
     </div>
   );
 };

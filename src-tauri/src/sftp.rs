@@ -258,6 +258,25 @@ impl SftpManager {
             .map_err(|e| format!("重命名失败: {:?}", e))
     }
 
+    /// 修改文件或目录权限
+    pub async fn chmod(&self, session_id: &str, path: &str, mode: u32) -> Result<(), String> {
+        let sessions = self.sessions.lock().await;
+        
+        let meta = sessions.get(session_id)
+            .ok_or("SFTP 会话不存在")?;
+
+        // 创建只包含权限的 FileAttributes
+        let attrs = russh_sftp::protocol::FileAttributes {
+            permissions: Some(mode),
+            ..Default::default()
+        };
+
+        // 使用 set_metadata 设置权限
+        meta.session.set_metadata(path, attrs)
+            .await
+            .map_err(|e| format!("修改权限失败: {:?}", e))
+    }
+
     /// 取消上传 - 高性能上传（taskId）
     pub async fn cancel_upload(&self, _session_id: &str, token: &str) -> Result<(), String> {
         let mut cancelled = self.cancelled_tasks.lock().await;
