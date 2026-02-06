@@ -116,7 +116,7 @@ const applyTerminalTheme = (term: any, container: HTMLDivElement, themeMode: The
 };
 
 // 自定义相等性检查函数：忽略 buffer 字段的变化
-// 只有当 id, serverId, serverName, isConnected, bufferRestored 发生变化时才触发更新
+// 只有当 id, serverId, serverName, isConnected 发生变化时才触发更新
 const sessionsEquality = (prev: any[], next: any[]) => {
   if (prev === next) return true;
   if (prev.length !== next.length) return false;
@@ -125,8 +125,7 @@ const sessionsEquality = (prev: any[], next: any[]) => {
     return p.id === n.id && 
            p.serverId === n.serverId && 
            p.serverName === n.serverName && 
-           p.isConnected === n.isConnected &&
-           p.bufferRestored === n.bufferRestored;
+           p.isConnected === n.isConnected;
   });
 };
 
@@ -471,8 +470,6 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
   const appendOutput = useTerminalOutputStore((state) => state.appendOutput);
   // 获取会话持久化存储函数
   const appendSessionOutput = useTerminalStore((state) => state.appendSessionOutput);
-  // 获取设置 buffer 恢复状态的函数
-  const setBufferRestored = useTerminalStore((state) => state.setBufferRestored);
   // 获取目录检测函数
   const parseAndUpdateFromOutput = useTerminalDirectoryStore((state) => state.parseAndUpdateFromOutput);
 
@@ -577,15 +574,12 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
 
       applyTerminalTheme(terminal, terminalRef.current, currentTheme);
 
-      // 如果有缓存的输出且尚未恢复过，先恢复显示
-      // 使用 store 中的 bufferRestored 状态来追踪，避免页面切换时重复恢复
+      // 每次重新挂载终端实例都要恢复缓存输出，否则切页返回后会出现空白终端。
       // 从 store 获取完整的 session 数据（包含 buffer）
       const currentSessionState = useTerminalStore.getState().sessions.find(s => s.id === session.id);
       
-      if (currentSessionState && currentSessionState.buffer && !session.bufferRestored) {
+      if (currentSessionState && currentSessionState.buffer) {
         terminal.write(currentSessionState.buffer);
-        // 标记 buffer 已恢复，防止再次恢复
-        setBufferRestored(session.id, true);
       }
 
       // 使用 ResizeObserver 监听容器大小变化

@@ -3,7 +3,6 @@ import { TerminalSession } from '@/types';
 
 interface ExtendedTerminalSession extends TerminalSession {
   buffer?: string; // Cache for terminal output
-  bufferRestored?: boolean; // 标记 buffer 是否已在终端中恢复过
 }
 
 interface TerminalStore {
@@ -17,7 +16,6 @@ interface TerminalStore {
   setActiveSessionId: (sessionId: string | null) => void;
   appendSessionOutput: (sessionId: string, output: string) => void;
   setSessionConnected: (sessionId: string, isConnected: boolean) => void;
-  setBufferRestored: (sessionId: string, restored: boolean) => void;
 }
 
 // Helper to strip ANSI codes if we want to save space, but for restoration we usually WANT ANSI codes.
@@ -71,12 +69,6 @@ export const useTerminalStore = create<TerminalStore>((set) => ({
   setSessionConnected: (sessionId, isConnected) => set((state) => ({
     sessions: state.sessions.map(s => 
       s.id === sessionId ? { ...s, isConnected } : s
-    )
-  })),
-
-  setBufferRestored: (sessionId, restored) => set((state) => ({
-    sessions: state.sessions.map(s => 
-      s.id === sessionId ? { ...s, bufferRestored: restored } : s
     )
   })),
 }));
