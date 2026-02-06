@@ -23,52 +23,66 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
     { id: "terminal" as const, label: "终端", icon: Terminal },
   ];
 
+  const navButtonBaseClass =
+    "group relative mx-auto flex h-10 w-10 sm:h-11 sm:w-11 items-center justify-center rounded-2xl transition-all duration-200 hover:-translate-y-0.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-surface-950";
+  const navButtonNormalClass =
+    "text-surface-500 hover:bg-surface-100/90 hover:text-surface-900 hover:shadow-sm dark:text-surface-400 dark:hover:bg-surface-800 dark:hover:text-surface-100";
+  const navButtonActiveClass =
+    "bg-gradient-to-br from-primary-50 to-primary-100 text-primary-700 ring-1 ring-primary-200 shadow-[0_12px_24px_rgba(13,148,136,0.2)] dark:from-primary-500/20 dark:to-primary-500/10 dark:text-primary-300 dark:ring-primary-400/35";
+  const tooltipClass =
+    "pointer-events-none absolute left-full z-[90] ml-3 -translate-x-1 whitespace-nowrap rounded-lg bg-surface-900 px-2.5 py-1.5 text-xs font-medium text-white opacity-0 shadow-lg transition-all duration-200 group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:translate-x-0 group-focus-visible:opacity-100 dark:bg-surface-100 dark:text-surface-900";
+
   return (
-    <aside className="w-64 h-full bg-white dark:bg-surface-950 border-r border-surface-200 dark:border-surface-800 flex flex-col transition-colors duration-300">
-      {/* Logo 区域 */}
-      <div className="h-16 flex items-center px-4 border-b border-surface-200 dark:border-surface-800 transition-colors duration-300">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center shadow-lg shadow-primary-500/20">
-            <Terminal className="w-5 h-5 text-white" />
-          </div>
-          <div>
-            <h1 className="text-lg font-semibold text-surface-900 dark:text-white transition-colors duration-300">AI-SSH</h1>
-            <p className="text-xs text-surface-500">智能终端</p>
-          </div>
-        </div>
+    <aside className="relative z-30 w-[74px] sm:w-[88px] h-full shrink-0 overflow-visible border-r border-surface-200/90 bg-white/95 dark:border-surface-800 dark:bg-surface-950 flex flex-col items-center py-4 transition-colors duration-300">
+      {/* Logo */}
+      <div className="group relative mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-primary-500 to-primary-700 shadow-lg shadow-primary-500/20">
+        <Terminal className="h-5 w-5 text-white" />
+        <span className={tooltipClass}>AI-SSH</span>
       </div>
 
-      {/* 导航菜单 */}
-      <nav className="flex-1 p-3 space-y-1">
+      {/* 导航 */}
+      <nav className="flex-1 w-full px-3 space-y-2">
         {menuItems.map((item) => (
           <button
             key={item.id}
             onClick={() => onViewChange(item.id)}
-            className={`sidebar-item w-full ${activeView === item.id ? "active" : ""}`}
+            title={item.label}
+            aria-label={item.label}
+            className={`${navButtonBaseClass} w-full ${
+              activeView === item.id ? navButtonActiveClass : navButtonNormalClass
+            }`}
           >
             <item.icon className="w-5 h-5" />
-            <span className="font-medium">{item.label}</span>
+            <span className={tooltipClass}>{item.label}</span>
           </button>
         ))}
       </nav>
 
-      {/* 传输任务面板 */}
-      <SidebarTransferPanel />
+      {/* 底部区域 */}
+      <div className="w-full px-3 space-y-2">
+        <SidebarTransferPanel compact />
 
-      {/* 底部设置 */}
-      <div className="p-3 border-t border-surface-200 dark:border-surface-800 space-y-1 transition-colors duration-300">
-        <button 
-          onClick={toggleTheme}
-          className="sidebar-item w-full"
-        >
-          {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-          <span className="font-medium">{theme === 'dark' ? '浅色模式' : '深色模式'}</span>
-        </button>
-        <button className="sidebar-item w-full">
-          <Settings className="w-5 h-5" />
-          <span className="font-medium">设置</span>
-        </button>
+        <div className="pt-2 border-t border-surface-200 dark:border-surface-800 space-y-2 transition-colors duration-300">
+          <button
+            onClick={toggleTheme}
+            title={theme === 'dark' ? '浅色模式' : '深色模式'}
+            aria-label={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
+            className={`${navButtonBaseClass} w-full ${navButtonNormalClass}`}
+          >
+            {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+            <span className={tooltipClass}>{theme === 'dark' ? '浅色模式' : '深色模式'}</span>
+          </button>
+          <button
+            title="设置"
+            aria-label="设置"
+            className={`${navButtonBaseClass} w-full ${navButtonNormalClass}`}
+          >
+            <Settings className="w-5 h-5" />
+            <span className={tooltipClass}>设置</span>
+          </button>
+        </div>
       </div>
+
     </aside>
   );
 }

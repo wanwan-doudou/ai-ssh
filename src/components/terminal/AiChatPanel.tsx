@@ -31,6 +31,8 @@ interface AiChatPanelProps {
   onExecuteCommand: (command: string) => void;
 }
 
+const MAX_INPUT_LINES = 5;
+
 export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -48,7 +50,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     toggleOperationMode 
   } = useChatStore();
   
-  const { getActiveProvider } = useProviderStore();
+  const { getActiveProvider, fetchProviders } = useProviderStore();
   // 订阅主题变更，确保组件重渲染（虽然主要依赖 CSS，但这样更稳健）
   const { theme } = useThemeStore();
   
@@ -72,17 +74,59 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     state.sessions.get(sessionId)?.waitingForOutput || false
   );
 
+  const resizeInputTextarea = (textarea?: HTMLTextAreaElement | null) => {
+    const el = textarea ?? inputRef.current;
+    if (!el) return;
+
+    // 先重置为 auto，才能正确读取 scrollHeight
+    el.style.height = 'auto';
+
+    const style = window.getComputedStyle(el);
+    const lineHeight = Number.parseFloat(style.lineHeight || '20') || 20;
+    const paddingTop = Number.parseFloat(style.paddingTop || '0') || 0;
+    const paddingBottom = Number.parseFloat(style.paddingBottom || '0') || 0;
+    const maxHeight = Math.ceil(lineHeight * MAX_INPUT_LINES + paddingTop + paddingBottom);
+    const nextHeight = Math.min(el.scrollHeight, maxHeight);
+
+    el.style.height = `${nextHeight}px`;
+    el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  };
+
+  const ensureActiveProvider = async () => {
+    let provider = getActiveProvider();
+    if (provider) return provider;
+
+    try {
+      await fetchProviders();
+    } catch (err) {
+      console.error('[AiChatPanel] 加载 Provider 失败:', err);
+    }
+
+    provider = useProviderStore.getState().getActiveProvider();
+    return provider;
+  };
+
   // 自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // 输入框随内容自动增高，最多 5 行
+  useEffect(() => {
+    resizeInputTextarea();
+  }, [input]);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+    resizeInputTextarea(e.target);
+  };
 
   // 发送消息到 AI（流式）
   const handleSendMessage = async () => {
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
 
-    const activeProvider = getActiveProvider();
+    const activeProvider = await ensureActiveProvider();
     if (!activeProvider) {
       addMessage(sessionId, {
         role: 'system',
@@ -324,7 +368,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
   
   // 发送命令输出给 AI 分析（流式）
   const sendOutputToAI = async (command: string, output: string) => {
-    const activeProvider = getActiveProvider();
+    const activeProvider = await ensureActiveProvider();
     if (!activeProvider) return;
 
     setLoading(sessionId, true);
@@ -551,27 +595,27 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
       </div>
 
       {/* 输入区域 */}
-      <div className="p-3 border-t border-surface-200 dark:border-surface-800 flex-shrink-0 transition-colors duration-300">
-        <div className="flex gap-2">
+      <div className="p-2 border-t border-surface-200 dark:border-surface-800 flex-shrink-0 transition-colors duration-300">
+        <div className="flex items-end gap-2">
           <textarea
             ref={inputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={handleInputChange}
             onKeyDown={handleKeyDown}
-            placeholder="输入指令或问题... (Enter 发送)"
-            className="flex-1 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-lg px-3 py-2 
+            placeholder="输入指令或问题... (Shift+Enter 换行, Enter 发送)"
+            className="flex-1 min-h-10 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-lg px-3 py-2
                        text-sm text-surface-900 dark:text-surface-100 placeholder-surface-400 dark:placeholder-surface-500 resize-none
                        focus:outline-none focus:border-primary-500 focus:ring-1 focus:ring-primary-500
                        transition-colors"
-            rows={2}
+            rows={1}
             disabled={isLoading}
           />
           <button
             onClick={handleSendMessage}
             disabled={!input.trim() || isLoading}
             className="px-4 bg-primary-600 hover:bg-primary-500 disabled:bg-surface-200 dark:disabled:bg-surface-700 
-                       disabled:text-surface-400 dark:disabled:text-surface-500 text-white rounded-lg transition-colors
-                       flex items-center justify-center"
+                        disabled:text-surface-400 dark:disabled:text-surface-500 text-white rounded-lg transition-colors
+                        h-10 flex items-center justify-center"
           >
             <Send className="w-4 h-4" />
           </button>

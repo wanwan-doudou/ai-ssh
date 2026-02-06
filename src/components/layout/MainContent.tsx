@@ -9,7 +9,7 @@ interface MainContentProps {
 
 export function MainContent({ activeView, onNavigate }: MainContentProps) {
   return (
-    <main className="flex-1 h-full overflow-hidden">
+    <main className="relative z-0 flex-1 h-full overflow-hidden">
       {activeView === "servers" && <ServerList onNavigate={onNavigate} />}
       {activeView === "providers" && <ProviderList />}
       {activeView === "terminal" && <TerminalView />}

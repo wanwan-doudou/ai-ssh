@@ -1,6 +1,23 @@
 import { useEffect, useRef, useState, useCallback, memo } from "react";
 import { useStoreWithEqualityFn } from 'zustand/traditional';
-import { Terminal as TerminalIcon, Plus, X, Server, Bot, FolderOpen, ChevronDown, ChevronUp } from "lucide-react";
+import {
+  Terminal as TerminalIcon,
+  Plus,
+  X,
+  Server,
+  Bot,
+  FolderOpen,
+  ChevronDown,
+  ChevronUp,
+  Activity,
+  Clock3,
+  Cpu,
+  HardDrive,
+  Network,
+  RefreshCw,
+  ChevronLeft,
+  ChevronRight
+} from "lucide-react";
 import { useServerStore } from "@/stores/serverStore";
 import { useChatStore } from "@/stores/chatStore";
 import { useTerminalOutputStore } from "@/stores/terminalOutputStore";
@@ -14,6 +31,12 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { useTerminalStore } from "@/stores/terminalStore";
 import { useThemeStore } from "@/stores/themeStore";
 import { useTerminalDirectoryStore } from "@/stores/terminalDirectoryStore";
+import type {
+  ServerRuntimeInfo,
+  ServerProcessInfo,
+  ServerNetworkConnection,
+  ServerFilesystemInfo
+} from "@/types";
 import { useShallow } from 'zustand/react/shallow';
 
 const darkTheme = {
@@ -129,6 +152,41 @@ const sessionsEquality = (prev: any[], next: any[]) => {
   });
 };
 
+const bytesFromKb = (valueKb: number) => Math.max(valueKb, 0) * 1024;
+
+const formatBytes = (bytes: number) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, index);
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+};
+
+const formatPercent = (value: number) => {
+  if (!Number.isFinite(value) || value < 0) return "0%";
+  return `${Math.min(value, 100).toFixed(1)}%`;
+};
+
+const RUNTIME_REFRESH_MS = 3000;
+const DETAIL_REFRESH_MS = 2000;
+const FILESYSTEM_REFRESH_MS = 8000;
+
+type ServerDetailKind = "overview" | "processes" | "network" | "memory" | "disk";
+
+interface ServerDetailTab {
+  id: string;
+  sessionId: string;
+  kind: ServerDetailKind;
+}
+
+const SERVER_DETAIL_LABELS: Record<ServerDetailKind, string> = {
+  overview: "系统信息",
+  processes: "进程",
+  network: "网络",
+  memory: "内存",
+  disk: "磁盘",
+};
+
 export function TerminalView() {
   const { servers, fetchServers } = useServerStore();
   
@@ -156,6 +214,24 @@ export function TerminalView() {
   const [showSftpPanel, setShowSftpPanel] = useState(false);
   // 待同步的 SFTP 目录（终端 cd 命令触发）
   const [pendingSftpDir, setPendingSftpDir] = useState<string | null>(null);
+  const [showServerInfoPanel, setShowServerInfoPanel] = useState(true);
+  const [serverInfo, setServerInfo] = useState<ServerRuntimeInfo | null>(null);
+  const [serverInfoError, setServerInfoError] = useState<string | null>(null);
+  const [isServerInfoLoading, setIsServerInfoLoading] = useState(false);
+  const [processList, setProcessList] = useState<ServerProcessInfo[]>([]);
+  const [processError, setProcessError] = useState<string | null>(null);
+  const [isProcessLoading, setIsProcessLoading] = useState(false);
+  const [networkConnections, setNetworkConnections] = useState<ServerNetworkConnection[]>([]);
+  const [networkError, setNetworkError] = useState<string | null>(null);
+  const [isNetworkLoading, setIsNetworkLoading] = useState(false);
+  const [filesystems, setFilesystems] = useState<ServerFilesystemInfo[]>([]);
+  const [filesystemError, setFilesystemError] = useState<string | null>(null);
+  const [isFilesystemLoading, setIsFilesystemLoading] = useState(false);
+  const [detailTabs, setDetailTabs] = useState<ServerDetailTab[]>([]);
+  const [activeDetailTabId, setActiveDetailTabId] = useState<string | null>(null);
+  const refreshingSessionRef = useRef<string | null>(null);
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  const detailTabsRef = useRef<ServerDetailTab[]>([]);
 
   // 组件挂载时从后端加载服务器列表
   useEffect(() => {
@@ -183,6 +259,7 @@ export function TerminalView() {
     });
     
     setShowServerSelector(false);
+    setActiveDetailTabId(null);
   };
 
   const handleSessionConnected = useCallback((sessionId: string) => {
@@ -212,6 +289,12 @@ export function TerminalView() {
       console.error("断开连接失败:", err);
     }
     
+    setDetailTabs((prev) => prev.filter((tab) => tab.sessionId !== sessionId));
+    setActiveDetailTabId((current) => {
+      if (!current) return null;
+      const activeTab = detailTabsRef.current.find((tab) => tab.id === current);
+      return activeTab?.sessionId === sessionId ? null : current;
+    });
     removeSession(sessionId);
   };
 
@@ -234,6 +317,197 @@ export function TerminalView() {
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    detailTabsRef.current = detailTabs;
+  }, [detailTabs]);
+
+  const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
+  const activeDetailTab = detailTabs.find((tab) => tab.id === activeDetailTabId) ?? null;
+
+  const fetchServerInfo = useCallback(async (sessionId: string, silent = false) => {
+    if (refreshingSessionRef.current === sessionId) {
+      return;
+    }
+
+    refreshingSessionRef.current = sessionId;
+    if (!silent) {
+      setIsServerInfoLoading(true);
+    }
+
+    try {
+      const info = await invoke<ServerRuntimeInfo>("get_server_runtime_info", { sessionId });
+      if (activeSessionIdRef.current === sessionId) {
+        setServerInfo(info);
+        setServerInfoError(null);
+      }
+    } catch (error) {
+      if (activeSessionIdRef.current === sessionId) {
+        setServerInfoError(String(error));
+      }
+    } finally {
+      if (refreshingSessionRef.current === sessionId) {
+        refreshingSessionRef.current = null;
+      }
+      if (!silent && activeSessionIdRef.current === sessionId) {
+        setIsServerInfoLoading(false);
+      }
+    }
+  }, []);
+
+  const fetchProcessList = useCallback(async (sessionId: string, silent = false) => {
+    if (!silent) {
+      setIsProcessLoading(true);
+    }
+
+    try {
+      const items = await invoke<ServerProcessInfo[]>("get_server_process_list", { sessionId, limit: 80 });
+      if (activeSessionIdRef.current === sessionId) {
+        setProcessList(items);
+        setProcessError(null);
+      }
+    } catch (error) {
+      if (activeSessionIdRef.current === sessionId) {
+        setProcessError(String(error));
+      }
+    } finally {
+      if (!silent && activeSessionIdRef.current === sessionId) {
+        setIsProcessLoading(false);
+      }
+    }
+  }, []);
+
+  const fetchNetworkConnections = useCallback(async (sessionId: string, silent = false) => {
+    if (!silent) {
+      setIsNetworkLoading(true);
+    }
+
+    try {
+      const items = await invoke<ServerNetworkConnection[]>("get_server_network_connections", { sessionId, limit: 120 });
+      if (activeSessionIdRef.current === sessionId) {
+        setNetworkConnections(items);
+        setNetworkError(null);
+      }
+    } catch (error) {
+      if (activeSessionIdRef.current === sessionId) {
+        setNetworkError(String(error));
+      }
+    } finally {
+      if (!silent && activeSessionIdRef.current === sessionId) {
+        setIsNetworkLoading(false);
+      }
+    }
+  }, []);
+
+  const fetchFilesystems = useCallback(async (sessionId: string, silent = false) => {
+    if (!silent) {
+      setIsFilesystemLoading(true);
+    }
+
+    try {
+      const items = await invoke<ServerFilesystemInfo[]>("get_server_filesystems", { sessionId, limit: 120 });
+      if (activeSessionIdRef.current === sessionId) {
+        setFilesystems(items);
+        setFilesystemError(null);
+      }
+    } catch (error) {
+      if (activeSessionIdRef.current === sessionId) {
+        setFilesystemError(String(error));
+      }
+    } finally {
+      if (!silent && activeSessionIdRef.current === sessionId) {
+        setIsFilesystemLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!activeSessionId || !activeSession?.isConnected) {
+      setServerInfo(null);
+      setServerInfoError(null);
+      setIsServerInfoLoading(false);
+      setProcessList([]);
+      setProcessError(null);
+      setIsProcessLoading(false);
+      setNetworkConnections([]);
+      setNetworkError(null);
+      setIsNetworkLoading(false);
+      setFilesystems([]);
+      setFilesystemError(null);
+      setIsFilesystemLoading(false);
+      return;
+    }
+
+    setServerInfo(null);
+    setServerInfoError(null);
+    fetchServerInfo(activeSessionId, false);
+
+    const timer = window.setInterval(() => {
+      fetchServerInfo(activeSessionId, true);
+    }, RUNTIME_REFRESH_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [activeSessionId, activeSession?.isConnected, fetchServerInfo]);
+
+  useEffect(() => {
+    if (!activeSessionId || !activeSession?.isConnected || (activeDetailTab?.kind !== "overview" && activeDetailTab?.kind !== "disk")) {
+      return;
+    }
+
+    setFilesystems([]);
+    setFilesystemError(null);
+    fetchFilesystems(activeSessionId, false);
+
+    const timer = window.setInterval(() => {
+      fetchFilesystems(activeSessionId, true);
+    }, FILESYSTEM_REFRESH_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [activeSessionId, activeSession?.isConnected, activeDetailTab?.kind, fetchFilesystems]);
+
+  useEffect(() => {
+    if (!activeSessionId || !activeSession?.isConnected || activeDetailTab?.kind !== "processes") {
+      return;
+    }
+
+    setProcessList([]);
+    setProcessError(null);
+    fetchProcessList(activeSessionId, false);
+
+    const timer = window.setInterval(() => {
+      fetchProcessList(activeSessionId, true);
+    }, DETAIL_REFRESH_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [activeSessionId, activeSession?.isConnected, activeDetailTab?.kind, fetchProcessList]);
+
+  useEffect(() => {
+    if (!activeSessionId || !activeSession?.isConnected || activeDetailTab?.kind !== "network") {
+      return;
+    }
+
+    setNetworkConnections([]);
+    setNetworkError(null);
+    fetchNetworkConnections(activeSessionId, false);
+
+    const timer = window.setInterval(() => {
+      fetchNetworkConnections(activeSessionId, true);
+    }, DETAIL_REFRESH_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [activeSessionId, activeSession?.isConnected, activeDetailTab?.kind, fetchNetworkConnections]);
+
   const handleExecuteCommand = (command: string) => {
     if (!activeSessionId) return;
     
@@ -244,6 +518,64 @@ export function TerminalView() {
     }).catch(console.error);
   };
 
+  const handleOpenServerDetail = useCallback((kind: ServerDetailKind) => {
+    if (!activeSessionId) return;
+    const tabId = `detail-${activeSessionId}-${kind}`;
+
+    setDetailTabs((prev) => {
+      if (prev.some((tab) => tab.id === tabId)) {
+        return prev;
+      }
+      return [...prev, { id: tabId, sessionId: activeSessionId, kind }];
+    });
+
+    setActiveSessionId(activeSessionId);
+    setActiveDetailTabId(tabId);
+  }, [activeSessionId, setActiveSessionId]);
+
+  const handleCloseDetailTab = useCallback((tabId: string) => {
+    setDetailTabs((prev) => prev.filter((tab) => tab.id !== tabId));
+    setActiveDetailTabId((current) => (current === tabId ? null : current));
+  }, []);
+
+  const handleRefreshDetail = useCallback(() => {
+    if (!activeSession) return;
+
+    if (activeDetailTab?.kind === "overview") {
+      fetchServerInfo(activeSession.id, false);
+      fetchFilesystems(activeSession.id, false);
+      return;
+    }
+
+    if (activeDetailTab?.kind === "memory") {
+      fetchServerInfo(activeSession.id, false);
+      return;
+    }
+
+    if (activeDetailTab?.kind === "disk") {
+      fetchServerInfo(activeSession.id, false);
+      fetchFilesystems(activeSession.id, false);
+      return;
+    }
+
+    if (activeDetailTab?.kind === "processes") {
+      fetchProcessList(activeSession.id, false);
+      return;
+    }
+
+    if (activeDetailTab?.kind === "network") {
+      fetchNetworkConnections(activeSession.id, false);
+      return;
+    }
+  }, [
+    activeSession,
+    activeDetailTab?.kind,
+    fetchFilesystems,
+    fetchNetworkConnections,
+    fetchProcessList,
+    fetchServerInfo
+  ]);
+
   return (
     <div className="h-full flex flex-col bg-surface-50 dark:bg-surface-950 transition-colors duration-300">
       {/* 标签页栏 */}
@@ -252,9 +584,12 @@ export function TerminalView() {
           {sessions.map((session) => (
             <div
               key={session.id}
-              onClick={() => setActiveSessionId(session.id)}
+              onClick={() => {
+                setActiveSessionId(session.id);
+                setActiveDetailTabId(null);
+              }}
               className={`flex items-center gap-2 px-3 py-1.5 rounded-lg cursor-pointer group transition-all ${
-                activeSessionId === session.id
+                activeSessionId === session.id && !activeDetailTabId
                   ? "bg-white dark:bg-surface-800 text-surface-900 dark:text-white shadow-sm border border-surface-200 dark:border-transparent"
                   : "text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-800 hover:text-surface-900 dark:hover:text-surface-200"
               }`}
@@ -271,6 +606,41 @@ export function TerminalView() {
               </button>
             </div>
           ))}
+
+          {detailTabs.map((tab) => {
+            const detailSession = sessions.find((session) => session.id === tab.sessionId);
+            if (!detailSession) return null;
+
+            return (
+              <div
+                key={tab.id}
+                onClick={() => {
+                  setActiveSessionId(tab.sessionId);
+                  setActiveDetailTabId(tab.id);
+                }}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg cursor-pointer group transition-all ${
+                  activeDetailTabId === tab.id
+                    ? "bg-white dark:bg-surface-800 text-surface-900 dark:text-white shadow-sm border border-surface-200 dark:border-transparent"
+                    : "text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-800 hover:text-surface-900 dark:hover:text-surface-200"
+                }`}
+                title={`${detailSession.serverName} ${SERVER_DETAIL_LABELS[tab.kind]}`}
+              >
+                <div className="w-2 h-2 rounded-sm bg-primary-500/80" />
+                <span className="text-sm font-medium truncate max-w-52">
+                  {detailSession.serverName} · {SERVER_DETAIL_LABELS[tab.kind]}
+                </span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleCloseDetailTab(tab.id);
+                  }}
+                  className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-surface-300 dark:hover:bg-surface-600 transition-opacity"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            );
+          })}
         </div>
 
         {/* 新建连接按钮 */}
@@ -323,70 +693,110 @@ export function TerminalView() {
       >
         {/* 左侧：终端区域 + SFTP 浏览器 */}
         <div 
-          className={`h-full min-w-0 flex flex-col ${isResizing ? 'transition-none' : 'transition-[width] duration-75'}`}
+          className={`h-full min-w-0 flex ${isResizing ? 'transition-none' : 'transition-[width] duration-75'}`}
           style={{ width: `${(1 - panelRatio) * 100}%` }}
         >
           {sessions.length === 0 ? (
             <EmptyTerminal onNewConnection={() => setShowServerSelector(true)} />
           ) : (
             <>
-              {/* 终端区域 */}
-              <div 
-                className="relative font-mono min-h-0" 
-                style={{ flex: showSftpPanel ? `1 1 calc(100% - ${sftpPanelHeight}px - 38px)` : '1 1 calc(100% - 32px)' }}
-              >
-                {sessions.map((session) => (
-                  <div
-                    key={session.id}
-                    className={`h-full absolute inset-0 ${activeSessionId === session.id ? "z-10 block" : "z-0 hidden"}`}
-                  >
-                    <TerminalInstance 
-                      session={session} 
-                      onConnected={() => handleSessionConnected(session.id)}
-                      onDisconnected={() => handleSessionDisconnected(session.id)}
-                      onDirectoryChange={handleDirectoryChange}
-                    />
-                  </div>
-                ))}
-              </div>
+              <ServerInfoPanel
+                visible={showServerInfoPanel}
+                onToggle={() => setShowServerInfoPanel((prev) => !prev)}
+                session={activeSession}
+                info={serverInfo}
+                isLoading={isServerInfoLoading}
+                error={serverInfoError}
+                onRefresh={() => activeSession && fetchServerInfo(activeSession.id, false)}
+                onOpenDetail={handleOpenServerDetail}
+              />
 
-              
-              {/* SFTP 面板切换按钮 */}
-              <div className="flex-shrink-0 h-8 flex items-center justify-between px-3 bg-surface-100 dark:bg-surface-900 border-t border-surface-200 dark:border-surface-800">
-                <button
-                  onClick={() => setShowSftpPanel(!showSftpPanel)}
-                  className="flex items-center gap-2 text-xs text-surface-600 dark:text-surface-400 hover:text-surface-900 dark:hover:text-white transition-colors"
-                >
-                  <FolderOpen className="w-4 h-4" />
-                  <span>文件浏览器</span>
-                  {showSftpPanel ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
-                </button>
-                {showSftpPanel && activeSessionId && (
-                  <span className="text-xs text-surface-500">使用 SFTP 浏览远程文件</span>
+              <div className="flex-1 min-w-0 flex flex-col">
+                {activeDetailTab ? (
+                  <ServerDetailView
+                    tab={activeDetailTab}
+                    session={activeSession}
+                    info={serverInfo}
+                    infoError={serverInfoError}
+                    filesystems={filesystems}
+                    filesystemError={filesystemError}
+                    processList={processList}
+                    processError={processError}
+                    networkConnections={networkConnections}
+                    networkError={networkError}
+                    isLoading={
+                      activeDetailTab.kind === "overview" || activeDetailTab.kind === "disk"
+                        ? (isServerInfoLoading || isFilesystemLoading)
+                        : activeDetailTab.kind === "memory"
+                          ? isServerInfoLoading
+                        : activeDetailTab.kind === "processes"
+                          ? isProcessLoading
+                          : isNetworkLoading
+                    }
+                    onRefresh={handleRefreshDetail}
+                    onBackToTerminal={() => setActiveDetailTabId(null)}
+                  />
+                ) : (
+                  <>
+                    {/* 终端区域 */}
+                    <div
+                      className="relative font-mono min-h-0"
+                      style={{ flex: showSftpPanel ? `1 1 calc(100% - ${sftpPanelHeight}px - 38px)` : '1 1 calc(100% - 32px)' }}
+                    >
+                      {sessions.map((session) => (
+                        <div
+                          key={session.id}
+                          className={`h-full absolute inset-0 ${activeSessionId === session.id ? "z-10 block" : "z-0 hidden"}`}
+                        >
+                          <TerminalInstance
+                            session={session}
+                            onConnected={() => handleSessionConnected(session.id)}
+                            onDisconnected={() => handleSessionDisconnected(session.id)}
+                            onDirectoryChange={handleDirectoryChange}
+                          />
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* SFTP 面板切换按钮 */}
+                    <div className="flex-shrink-0 h-8 flex items-center justify-between px-3 bg-surface-100 dark:bg-surface-900 border-t border-surface-200 dark:border-surface-800">
+                      <button
+                        onClick={() => setShowSftpPanel(!showSftpPanel)}
+                        className="flex items-center gap-2 text-xs text-surface-600 dark:text-surface-400 hover:text-surface-900 dark:hover:text-white transition-colors"
+                      >
+                        <FolderOpen className="w-4 h-4" />
+                        <span>文件浏览器</span>
+                        {showSftpPanel ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
+                      </button>
+                      {showSftpPanel && activeSessionId && (
+                        <span className="text-xs text-surface-500">使用 SFTP 浏览远程文件</span>
+                      )}
+                    </div>
+
+                    {/* SFTP 文件浏览器面板 */}
+                    {showSftpPanel && activeSessionId && (
+                      <>
+                        <HorizontalDivider
+                          position={sftpPanelHeight}
+                          onPositionChange={setSftpPanelHeight}
+                          minHeight={150}
+                          maxHeight={500}
+                        />
+                        <div style={{ height: sftpPanelHeight }} className="flex-shrink-0">
+                          <FileExplorer
+                            sessionId={activeSessionId}
+                            serverId={sessions.find(s => s.id === activeSessionId)?.serverId || ''}
+                            height={sftpPanelHeight}
+                            syncDirectory={pendingSftpDir}
+                            onSyncComplete={() => setPendingSftpDir(null)}
+                            isSSHConnected={sessions.find(s => s.id === activeSessionId)?.isConnected || false}
+                          />
+                        </div>
+                      </>
+                    )}
+                  </>
                 )}
               </div>
-              
-              {/* SFTP 文件浏览器面板 */}
-              {showSftpPanel && activeSessionId && (
-                <>
-                  <HorizontalDivider
-                    position={sftpPanelHeight}
-                    onPositionChange={setSftpPanelHeight}
-                    minHeight={150}
-                    maxHeight={500}
-                  />
-                  <div style={{ height: sftpPanelHeight }} className="flex-shrink-0">
-                    <FileExplorer
-                      sessionId={activeSessionId}
-                      serverId={sessions.find(s => s.id === activeSessionId)?.serverId || ''}
-                      height={sftpPanelHeight}
-                      syncDirectory={pendingSftpDir}
-                      onSyncComplete={() => setPendingSftpDir(null)}
-                      isSSHConnected={sessions.find(s => s.id === activeSessionId)?.isConnected || false}
-                    />
-                  </div>
-                </>
-              )}
             </>
           )}
         </div>
@@ -415,7 +825,7 @@ export function TerminalView() {
               onExecuteCommand={handleExecuteCommand}
             />
           ) : (
-            <div className="h-full flex flex-col items-center justify-center text-surface-500 p-4 text-center">
+            <div className="w-full h-full flex flex-col items-center justify-center text-surface-500 p-4 text-center">
               <div className="w-12 h-12 rounded-xl bg-surface-200 dark:bg-surface-800/50 flex items-center justify-center mb-4 text-primary-600 dark:text-primary-400">
                 <Bot className="w-6 h-6 opacity-60" />
               </div>
@@ -428,9 +838,711 @@ export function TerminalView() {
   );
 }
 
+interface ServerInfoPanelProps {
+  visible: boolean;
+  onToggle: () => void;
+  session: any | null;
+  info: ServerRuntimeInfo | null;
+  isLoading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+  onOpenDetail: (kind: ServerDetailKind) => void;
+}
+
+function ServerInfoPanel({ visible, onToggle, session, info, isLoading, error, onRefresh, onOpenDetail }: ServerInfoPanelProps) {
+  const isConnected = Boolean(session?.isConnected);
+  const memoryPercent = info && info.memoryTotalKb > 0
+    ? (info.memoryUsedKb / info.memoryTotalKb) * 100
+    : 0;
+  const diskPercent = info
+    ? (info.diskUsePercent > 0
+      ? info.diskUsePercent
+      : (info.diskTotalKb > 0 ? (info.diskUsedKb / info.diskTotalKb) * 100 : 0))
+    : 0;
+  const detailCardClass = "w-full rounded-lg border border-surface-200 dark:border-surface-800 bg-white/80 dark:bg-surface-950/50 p-3 space-y-2 text-left transition-colors hover:border-primary-300 dark:hover:border-primary-700";
+
+  if (!visible) {
+    return (
+      <div className="w-8 h-full border-r border-surface-200 dark:border-surface-800 bg-surface-100 dark:bg-surface-900 flex-shrink-0 flex items-start justify-center pt-3">
+        <button
+          onClick={onToggle}
+          className="w-6 h-6 rounded-md bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 text-surface-500 dark:text-surface-300 hover:text-primary-600 dark:hover:text-primary-400 transition-colors flex items-center justify-center"
+          title="展开服务器信息"
+        >
+          <ChevronRight className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-72 h-full flex-shrink-0 border-r border-surface-200 dark:border-surface-800 bg-surface-100/70 dark:bg-surface-900/70 flex flex-col">
+      <div className="h-10 px-3 border-b border-surface-200 dark:border-surface-800 flex items-center justify-between">
+        <div className="flex items-center gap-2 min-w-0">
+          <Activity className="w-4 h-4 text-primary-600 dark:text-primary-400" />
+          <span className="text-xs font-semibold text-surface-700 dark:text-surface-200 truncate">服务器信息</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={onRefresh}
+            disabled={!isConnected || isLoading}
+            className="w-6 h-6 rounded-md hover:bg-surface-200 dark:hover:bg-surface-800 text-surface-500 dark:text-surface-400 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center"
+            title="刷新"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? "animate-spin" : ""}`} />
+          </button>
+          <button
+            onClick={onToggle}
+            className="w-6 h-6 rounded-md hover:bg-surface-200 dark:hover:bg-surface-800 text-surface-500 dark:text-surface-400 flex items-center justify-center"
+            title="收起服务器信息"
+          >
+            <ChevronLeft className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+        <div className="rounded-lg border border-surface-200 dark:border-surface-800 bg-white/80 dark:bg-surface-950/50 p-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-semibold text-surface-800 dark:text-surface-100 truncate">{session?.serverName || "未选择会话"}</p>
+            <span className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-500" : "bg-yellow-500 animate-pulse"}`} />
+          </div>
+          <p className="mt-1 text-xs text-surface-500 dark:text-surface-400">
+            {isConnected ? "已连接" : "连接中"}
+          </p>
+        </div>
+
+        {!session && (
+          <div className="text-xs text-surface-500 dark:text-surface-400">请选择一个会话查看服务器信息。</div>
+        )}
+
+        {session && !isConnected && (
+          <div className="text-xs text-surface-500 dark:text-surface-400">连接成功后将自动展示主机运行信息。</div>
+        )}
+
+        {session && isConnected && error && !info && (
+          <div className="rounded-lg border border-red-200 dark:border-red-900/40 bg-red-50 dark:bg-red-950/20 p-3 text-xs text-red-600 dark:text-red-300 break-words">
+            获取服务器信息失败: {error}
+          </div>
+        )}
+
+        {session && isConnected && info && (
+          <>
+            <button
+              type="button"
+              onClick={() => onOpenDetail("overview")}
+              className={detailCardClass}
+              title="查看系统信息详情"
+            >
+              <div className="flex items-center gap-2 text-surface-700 dark:text-surface-200">
+                <Clock3 className="w-3.5 h-3.5" />
+                <span className="text-xs font-medium">系统信息</span>
+              </div>
+              <p className="text-xs text-surface-600 dark:text-surface-300 break-words">{info.os}</p>
+              <p className="text-xs text-surface-500 dark:text-surface-400 break-words">
+                {info.kernelName} {info.kernelVersion} ({info.architecture})
+              </p>
+              <p className="text-xs text-surface-500 dark:text-surface-400 break-words">运行时间: {info.uptime}</p>
+              <p className="text-xs text-surface-500 dark:text-surface-400 break-all">{info.host} / {info.ipAddress}</p>
+              <p className="text-[11px] text-primary-600 dark:text-primary-400">点击打开系统信息标签（约 3 秒刷新）</p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onOpenDetail("processes")}
+              className={detailCardClass}
+              title="查看进程详情"
+            >
+              <div className="flex items-center gap-2 text-surface-700 dark:text-surface-200">
+                <Cpu className="w-3.5 h-3.5" />
+                <span className="text-xs font-medium">进程</span>
+              </div>
+              <p className="text-xs text-surface-600 dark:text-surface-300 break-words">{info.cpuModel}</p>
+              <p className="text-xs text-surface-500 dark:text-surface-400">核心数: {info.cpuCores || "-"}</p>
+              <p className="text-xs text-surface-500 dark:text-surface-400">负载: {info.loadAvg}</p>
+              <p className="text-xs text-surface-500 dark:text-surface-400">占用: {formatPercent(Math.max(0, 100 - Math.min(info.cpuIdlePercent, 100)))}</p>
+              <p className="text-[11px] text-primary-600 dark:text-primary-400">点击打开进程标签（约 2 秒刷新）</p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onOpenDetail("memory")}
+              className={detailCardClass}
+              title="查看内存详情"
+            >
+              <div className="flex items-center justify-between text-xs text-surface-700 dark:text-surface-200">
+                <div className="flex items-center gap-2">
+                  <Activity className="w-3.5 h-3.5" />
+                  <span className="font-medium">内存</span>
+                </div>
+                <span>{formatPercent(memoryPercent)}</span>
+              </div>
+              <div className="w-full h-1.5 rounded-full bg-surface-200 dark:bg-surface-800 overflow-hidden">
+                <div className="h-full bg-primary-500 rounded-full" style={{ width: `${Math.min(memoryPercent, 100)}%` }} />
+              </div>
+              <p className="text-xs text-surface-500 dark:text-surface-400">
+                {formatBytes(bytesFromKb(info.memoryUsedKb))} / {formatBytes(bytesFromKb(info.memoryTotalKb))}
+              </p>
+              <p className="text-xs text-surface-500 dark:text-surface-400">
+                Swap: {info.swapTotalKb > 0 ? `${formatBytes(bytesFromKb(info.swapUsedKb))} / ${formatBytes(bytesFromKb(info.swapTotalKb))}` : "未启用"}
+              </p>
+              <p className="text-[11px] text-primary-600 dark:text-primary-400">点击打开内存标签（约 3 秒刷新）</p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onOpenDetail("disk")}
+              className={detailCardClass}
+              title="查看磁盘详情"
+            >
+              <div className="flex items-center justify-between text-xs text-surface-700 dark:text-surface-200">
+                <div className="flex items-center gap-2">
+                  <HardDrive className="w-3.5 h-3.5" />
+                  <span className="font-medium">磁盘 /</span>
+                </div>
+                <span>{formatPercent(diskPercent)}</span>
+              </div>
+              <div className="w-full h-1.5 rounded-full bg-surface-200 dark:bg-surface-800 overflow-hidden">
+                <div className="h-full bg-teal-500 rounded-full" style={{ width: `${Math.min(diskPercent, 100)}%` }} />
+              </div>
+              <p className="text-xs text-surface-500 dark:text-surface-400">
+                {formatBytes(bytesFromKb(info.diskUsedKb))} / {formatBytes(bytesFromKb(info.diskTotalKb))}
+              </p>
+              <p className="text-[11px] text-primary-600 dark:text-primary-400">点击打开磁盘标签（约 3 秒刷新）</p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onOpenDetail("network")}
+              className={detailCardClass}
+              title="查看网络详情"
+            >
+              <div className="flex items-center gap-2 text-surface-700 dark:text-surface-200">
+                <Network className="w-3.5 h-3.5" />
+                <span className="text-xs font-medium">网络</span>
+              </div>
+              <p className="text-xs text-surface-500 dark:text-surface-400">接收: {formatBytes(info.netRxBytes)}</p>
+              <p className="text-xs text-surface-500 dark:text-surface-400">发送: {formatBytes(info.netTxBytes)}</p>
+              <p className="text-[11px] text-primary-600 dark:text-primary-400">点击打开网络标签（约 2 秒刷新）</p>
+            </button>
+
+            <p className="text-[11px] text-surface-400 dark:text-surface-500">
+              最后刷新: {new Date(info.collectedAt).toLocaleTimeString()}
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface ServerDetailViewProps {
+  tab: ServerDetailTab;
+  session: any | null;
+  info: ServerRuntimeInfo | null;
+  infoError: string | null;
+  filesystems: ServerFilesystemInfo[];
+  filesystemError: string | null;
+  processList: ServerProcessInfo[];
+  processError: string | null;
+  networkConnections: ServerNetworkConnection[];
+  networkError: string | null;
+  isLoading: boolean;
+  onRefresh: () => void;
+  onBackToTerminal: () => void;
+}
+
+function ServerDetailView({
+  tab,
+  session,
+  info,
+  infoError,
+  filesystems,
+  filesystemError,
+  processList,
+  processError,
+  networkConnections,
+  networkError,
+  isLoading,
+  onRefresh,
+  onBackToTerminal
+}: ServerDetailViewProps) {
+  const isConnected = Boolean(session?.isConnected);
+  const memoryPercent = info && info.memoryTotalKb > 0
+    ? (info.memoryUsedKb / info.memoryTotalKb) * 100
+    : 0;
+  const swapPercent = info && info.swapTotalKb > 0
+    ? (info.swapUsedKb / info.swapTotalKb) * 100
+    : 0;
+  const diskPercent = info
+    ? (info.diskUsePercent > 0
+      ? info.diskUsePercent
+      : (info.diskTotalKb > 0 ? (info.diskUsedKb / info.diskTotalKb) * 100 : 0))
+    : 0;
+  const memoryAvailableBytes = info
+    ? bytesFromKb(info.memoryAvailableKb > 0 ? info.memoryAvailableKb : Math.max(info.memoryTotalKb - info.memoryUsedKb, 0))
+    : 0;
+  const swapAvailableBytes = info
+    ? Math.max(bytesFromKb(info.swapTotalKb) - bytesFromKb(info.swapUsedKb), 0)
+    : 0;
+  const cpuBusyPercent = info
+    ? Math.max(
+      0,
+      Math.min(
+        info.cpuUserPercent
+          + info.cpuNicePercent
+          + info.cpuSystemPercent
+          + info.cpuIowaitPercent
+          + info.cpuIrqPercent
+          + info.cpuSoftirqPercent
+          + info.cpuStealPercent,
+        100
+      )
+    )
+    : 0;
+  const sectionClass = "rounded-xl border border-surface-200 dark:border-surface-800 bg-white dark:bg-surface-900 p-4";
+  const valueClass = "text-sm text-surface-700 dark:text-surface-200";
+
+  const renderRuntimeSnapshotSection = () => {
+    if (!info) return null;
+
+    return (
+      <div className={sectionClass}>
+        <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">资源快照</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+          <div className="rounded-lg bg-surface-100 dark:bg-surface-800/60 p-3">
+            <div className="flex items-center justify-between text-xs text-surface-600 dark:text-surface-300">
+              <span>CPU 占用</span>
+              <span>{formatPercent(cpuBusyPercent)}</span>
+            </div>
+            <div className="w-full h-1.5 rounded-full bg-surface-200 dark:bg-surface-700 overflow-hidden mt-1.5">
+              <div className="h-full bg-amber-500 rounded-full" style={{ width: `${Math.min(cpuBusyPercent, 100)}%` }} />
+            </div>
+            <p className="mt-2 text-xs text-surface-600 dark:text-surface-300">负载: {info.loadAvg}</p>
+          </div>
+
+          <div className="rounded-lg bg-surface-100 dark:bg-surface-800/60 p-3">
+            <div className="flex items-center justify-between text-xs text-surface-600 dark:text-surface-300">
+              <span>内存</span>
+              <span>{formatPercent(memoryPercent)}</span>
+            </div>
+            <div className="w-full h-1.5 rounded-full bg-surface-200 dark:bg-surface-700 overflow-hidden mt-1.5">
+              <div className="h-full bg-primary-500 rounded-full" style={{ width: `${Math.min(memoryPercent, 100)}%` }} />
+            </div>
+            <p className="mt-2 text-xs text-surface-600 dark:text-surface-300">
+              {formatBytes(bytesFromKb(info.memoryUsedKb))} / {formatBytes(bytesFromKb(info.memoryTotalKb))}
+            </p>
+          </div>
+
+          <div className="rounded-lg bg-surface-100 dark:bg-surface-800/60 p-3">
+            <div className="flex items-center justify-between text-xs text-surface-600 dark:text-surface-300">
+              <span>交换</span>
+              <span>{info.swapTotalKb > 0 ? formatPercent(swapPercent) : "未启用"}</span>
+            </div>
+            <div className="w-full h-1.5 rounded-full bg-surface-200 dark:bg-surface-700 overflow-hidden mt-1.5">
+              <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${Math.min(swapPercent, 100)}%` }} />
+            </div>
+            <p className="mt-2 text-xs text-surface-600 dark:text-surface-300">
+              {info.swapTotalKb > 0
+                ? `${formatBytes(bytesFromKb(info.swapUsedKb))} / ${formatBytes(bytesFromKb(info.swapTotalKb))}`
+                : "服务器未开启 Swap"}
+            </p>
+          </div>
+        </div>
+
+        <div className="overflow-auto mt-3">
+          <table className="w-full text-xs text-left">
+            <thead>
+              <tr className="text-surface-500 dark:text-surface-400 border-b border-surface-200 dark:border-surface-800">
+                <th className="py-2 pr-2 font-medium">用户</th>
+                <th className="py-2 pr-2 font-medium">系统</th>
+                <th className="py-2 pr-2 font-medium">Nice</th>
+                <th className="py-2 pr-2 font-medium">空闲</th>
+                <th className="py-2 pr-2 font-medium">IO 等待</th>
+                <th className="py-2 pr-2 font-medium">硬中断</th>
+                <th className="py-2 pr-2 font-medium">软中断</th>
+                <th className="py-2 font-medium">实时</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="border-b border-surface-100 dark:border-surface-800/60">
+                <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{formatPercent(info.cpuUserPercent)}</td>
+                <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{formatPercent(info.cpuSystemPercent)}</td>
+                <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{formatPercent(info.cpuNicePercent)}</td>
+                <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{formatPercent(info.cpuIdlePercent)}</td>
+                <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{formatPercent(info.cpuIowaitPercent)}</td>
+                <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{formatPercent(info.cpuIrqPercent)}</td>
+                <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{formatPercent(info.cpuSoftirqPercent)}</td>
+                <td className="py-2 text-surface-700 dark:text-surface-200">{formatPercent(info.cpuStealPercent)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3 text-xs text-surface-500 dark:text-surface-400">
+          <p>可用内存: {formatBytes(memoryAvailableBytes)}</p>
+          <p>可用交换: {formatBytes(swapAvailableBytes)}</p>
+          <p>网络累计接收: {formatBytes(info.netRxBytes)}</p>
+          <p>网络累计发送: {formatBytes(info.netTxBytes)}</p>
+        </div>
+      </div>
+    );
+  };
+
+  const renderDetailContent = () => {
+    switch (tab.kind) {
+      case "overview":
+        if (!info) return null;
+        return (
+          <>
+            <div className={sectionClass}>
+              <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">系统概览</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <p className={valueClass}>主机名: {info.host}</p>
+                  <p className={valueClass}>IP: {info.ipAddress}</p>
+                  <p className={valueClass}>操作系统: {info.os}</p>
+                  <p className={valueClass}>内核: {info.kernelName}</p>
+                  <p className={valueClass}>核心数: {info.cpuCores || "-"}</p>
+                </div>
+                <div className="space-y-2">
+                  <p className={valueClass}>内核版本: {info.kernelVersion}</p>
+                  <p className={valueClass}>架构: {info.architecture}</p>
+                  <p className={valueClass}>运行时间: {info.uptime}</p>
+                  <p className={valueClass}>CPU: {info.cpuModel}</p>
+                  <p className={valueClass}>负载: {info.loadAvg}</p>
+                </div>
+              </div>
+            </div>
+
+            {renderRuntimeSnapshotSection()}
+
+            <div className={sectionClass}>
+              <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">文件系统</h3>
+              {filesystemError && filesystems.length === 0 && (
+                <div className="rounded-lg border border-red-200 dark:border-red-900/40 bg-red-50 dark:bg-red-950/20 p-3 text-sm text-red-600 dark:text-red-300 break-words">
+                  获取文件系统失败: {filesystemError}
+                </div>
+              )}
+              {!filesystemError && filesystems.length === 0 && (
+                <div className="text-sm text-surface-500 dark:text-surface-400">暂无文件系统数据</div>
+              )}
+              {filesystems.length > 0 && (
+                <div className="overflow-auto">
+                  <table className="w-full text-xs text-left">
+                    <thead>
+                      <tr className="text-surface-500 dark:text-surface-400 border-b border-surface-200 dark:border-surface-800">
+                        <th className="py-2 pr-2 font-medium">文件系统</th>
+                        <th className="py-2 pr-2 font-medium">类型</th>
+                        <th className="py-2 pr-2 font-medium">已用</th>
+                        <th className="py-2 pr-2 font-medium whitespace-nowrap">可用</th>
+                        <th className="py-2 pr-2 font-medium">使用率</th>
+                        <th className="py-2 font-medium">挂载点</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filesystems.map((item) => (
+                        <tr key={`${item.fileSystem}-${item.mountPoint}`} className="border-b border-surface-100 dark:border-surface-800/60">
+                          <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{item.fileSystem}</td>
+                          <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{item.fsType}</td>
+                          <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">
+                            {formatBytes(bytesFromKb(item.usedKb))} / {formatBytes(bytesFromKb(item.sizeKb))}
+                          </td>
+                          <td className="py-2 pr-2 text-surface-600 dark:text-surface-300 whitespace-nowrap">{formatBytes(bytesFromKb(item.availKb))}</td>
+                          <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{formatPercent(item.usePercent)}</td>
+                          <td className="py-2 text-surface-600 dark:text-surface-300 whitespace-normal break-all">{item.mountPoint}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </>
+        );
+      case "memory":
+        if (!info) return null;
+        return (
+          <div className={sectionClass}>
+            <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">内存详情</h3>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-sm text-surface-700 dark:text-surface-200">
+                <span>内存使用率</span>
+                <span>{formatPercent(memoryPercent)}</span>
+              </div>
+              <div className="w-full h-2 rounded-full bg-surface-200 dark:bg-surface-800 overflow-hidden">
+                <div className="h-full bg-primary-500 rounded-full" style={{ width: `${Math.min(memoryPercent, 100)}%` }} />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                <div className="rounded-lg bg-surface-100 dark:bg-surface-800/60 p-3">
+                  <p className="text-surface-500 dark:text-surface-400 text-xs">总内存</p>
+                  <p className="mt-1 text-surface-800 dark:text-surface-100">{formatBytes(bytesFromKb(info.memoryTotalKb))}</p>
+                </div>
+                <div className="rounded-lg bg-surface-100 dark:bg-surface-800/60 p-3">
+                  <p className="text-surface-500 dark:text-surface-400 text-xs">已使用</p>
+                  <p className="mt-1 text-surface-800 dark:text-surface-100">{formatBytes(bytesFromKb(info.memoryUsedKb))}</p>
+                </div>
+                <div className="rounded-lg bg-surface-100 dark:bg-surface-800/60 p-3">
+                  <p className="text-surface-500 dark:text-surface-400 text-xs">可用</p>
+                  <p className="mt-1 text-surface-800 dark:text-surface-100">
+                    {formatBytes(memoryAvailableBytes)}
+                  </p>
+                </div>
+              </div>
+              <div className="rounded-lg bg-surface-100 dark:bg-surface-800/60 p-3 text-sm">
+                <div className="flex items-center justify-between text-xs text-surface-500 dark:text-surface-400">
+                  <span>交换空间</span>
+                  <span>{info.swapTotalKb > 0 ? formatPercent(swapPercent) : "未启用"}</span>
+                </div>
+                {info.swapTotalKb > 0 ? (
+                  <>
+                    <div className="w-full h-1.5 rounded-full bg-surface-200 dark:bg-surface-700 overflow-hidden mt-1.5">
+                      <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${Math.min(swapPercent, 100)}%` }} />
+                    </div>
+                    <p className="mt-2 text-surface-800 dark:text-surface-100">
+                      {formatBytes(bytesFromKb(info.swapUsedKb))} / {formatBytes(bytesFromKb(info.swapTotalKb))}
+                    </p>
+                  </>
+                ) : (
+                  <p className="mt-2 text-surface-600 dark:text-surface-300">服务器未开启 Swap。</p>
+                )}
+              </div>
+              <p className="text-xs text-surface-500 dark:text-surface-400">
+                采集时间: {new Date(info.collectedAt).toLocaleString()}
+              </p>
+            </div>
+          </div>
+        );
+      case "disk":
+        if (!info) return null;
+        return (
+          <>
+            <div className={sectionClass}>
+              <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">磁盘详情</h3>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-sm text-surface-700 dark:text-surface-200">
+                  <span>根分区使用率 (/)</span>
+                  <span>{formatPercent(diskPercent)}</span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-surface-200 dark:bg-surface-800 overflow-hidden">
+                  <div className="h-full bg-teal-500 rounded-full" style={{ width: `${Math.min(diskPercent, 100)}%` }} />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                  <div className="rounded-lg bg-surface-100 dark:bg-surface-800/60 p-3">
+                    <p className="text-surface-500 dark:text-surface-400 text-xs">总容量</p>
+                    <p className="mt-1 text-surface-800 dark:text-surface-100">{formatBytes(bytesFromKb(info.diskTotalKb))}</p>
+                  </div>
+                  <div className="rounded-lg bg-surface-100 dark:bg-surface-800/60 p-3">
+                    <p className="text-surface-500 dark:text-surface-400 text-xs">已使用</p>
+                    <p className="mt-1 text-surface-800 dark:text-surface-100">{formatBytes(bytesFromKb(info.diskUsedKb))}</p>
+                  </div>
+                  <div className="rounded-lg bg-surface-100 dark:bg-surface-800/60 p-3">
+                    <p className="text-surface-500 dark:text-surface-400 text-xs">可用</p>
+                    <p className="mt-1 text-surface-800 dark:text-surface-100">
+                      {formatBytes(Math.max(bytesFromKb(info.diskTotalKb) - bytesFromKb(info.diskUsedKb), 0))}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {renderRuntimeSnapshotSection()}
+
+            <div className={sectionClass}>
+              <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">文件系统</h3>
+              {filesystemError && filesystems.length === 0 && (
+                <div className="rounded-lg border border-red-200 dark:border-red-900/40 bg-red-50 dark:bg-red-950/20 p-3 text-sm text-red-600 dark:text-red-300 break-words">
+                  获取文件系统失败: {filesystemError}
+                </div>
+              )}
+              {!filesystemError && filesystems.length === 0 && (
+                <div className="text-sm text-surface-500 dark:text-surface-400">暂无文件系统数据</div>
+              )}
+              {filesystems.length > 0 && (
+                <div className="overflow-auto">
+                  <table className="w-full text-xs text-left">
+                    <thead>
+                      <tr className="text-surface-500 dark:text-surface-400 border-b border-surface-200 dark:border-surface-800">
+                        <th className="py-2 pr-2 font-medium">文件系统</th>
+                        <th className="py-2 pr-2 font-medium">类型</th>
+                        <th className="py-2 pr-2 font-medium">已用</th>
+                        <th className="py-2 pr-2 font-medium whitespace-nowrap">可用</th>
+                        <th className="py-2 pr-2 font-medium">使用率</th>
+                        <th className="py-2 font-medium">挂载点</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filesystems.map((item) => (
+                        <tr key={`${item.fileSystem}-${item.mountPoint}`} className="border-b border-surface-100 dark:border-surface-800/60">
+                          <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{item.fileSystem}</td>
+                          <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{item.fsType}</td>
+                          <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">
+                            {formatBytes(bytesFromKb(item.usedKb))} / {formatBytes(bytesFromKb(item.sizeKb))}
+                          </td>
+                          <td className="py-2 pr-2 text-surface-600 dark:text-surface-300 whitespace-nowrap">{formatBytes(bytesFromKb(item.availKb))}</td>
+                          <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{formatPercent(item.usePercent)}</td>
+                          <td className="py-2 text-surface-600 dark:text-surface-300 whitespace-normal break-all">{item.mountPoint}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </>
+        );
+      case "processes":
+        return (
+          <div className={sectionClass}>
+            <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">进程列表</h3>
+            {processError && processList.length === 0 && (
+              <div className="rounded-lg border border-red-200 dark:border-red-900/40 bg-red-50 dark:bg-red-950/20 p-3 text-sm text-red-600 dark:text-red-300 break-words mb-3">
+                获取进程信息失败: {processError}
+              </div>
+            )}
+            {processList.length === 0 ? (
+              <div className="text-sm text-surface-500 dark:text-surface-400">暂无进程数据</div>
+            ) : (
+              <div className="overflow-auto">
+                <table className="w-full text-xs text-left">
+                  <thead>
+                    <tr className="text-surface-500 dark:text-surface-400 border-b border-surface-200 dark:border-surface-800">
+                      <th className="py-2 pr-2 font-medium">PID</th>
+                      <th className="py-2 pr-2 font-medium">用户</th>
+                      <th className="py-2 pr-2 font-medium">内存</th>
+                      <th className="py-2 pr-2 font-medium">CPU%</th>
+                      <th className="py-2 pr-2 font-medium">名称</th>
+                      <th className="py-2 font-medium">命令</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {processList.map((item) => (
+                      <tr key={`${item.pid}-${item.name}-${item.cpuPercent}`} className="border-b border-surface-100 dark:border-surface-800/60">
+                        <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{item.pid}</td>
+                        <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{item.user || "-"}</td>
+                        <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{formatBytes(bytesFromKb(item.memoryKb))}</td>
+                        <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{item.cpuPercent.toFixed(1)}</td>
+                        <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{item.name || "-"}</td>
+                        <td className="py-2 text-surface-600 dark:text-surface-300 break-all">{item.command || "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      case "network":
+        return (
+          <div className={sectionClass}>
+            <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">网络连接</h3>
+            {networkError && networkConnections.length === 0 && (
+              <div className="rounded-lg border border-red-200 dark:border-red-900/40 bg-red-50 dark:bg-red-950/20 p-3 text-sm text-red-600 dark:text-red-300 break-words mb-3">
+                获取网络连接失败: {networkError}
+              </div>
+            )}
+            {networkConnections.length === 0 ? (
+              <div className="text-sm text-surface-500 dark:text-surface-400">暂无网络连接数据</div>
+            ) : (
+              <div className="overflow-auto">
+                <table className="w-full text-xs text-left">
+                  <thead>
+                    <tr className="text-surface-500 dark:text-surface-400 border-b border-surface-200 dark:border-surface-800">
+                      <th className="py-2 pr-2 font-medium">协议</th>
+                      <th className="py-2 pr-2 font-medium">状态</th>
+                      <th className="py-2 pr-2 font-medium">本地地址</th>
+                      <th className="py-2 pr-2 font-medium">远端地址</th>
+                      <th className="py-2 pr-2 font-medium">接收队列</th>
+                      <th className="py-2 pr-2 font-medium">发送队列</th>
+                      <th className="py-2 font-medium">进程</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {networkConnections.map((item, index) => (
+                      <tr key={`${item.protocol}-${item.localAddress}-${item.peerAddress}-${index}`} className="border-b border-surface-100 dark:border-surface-800/60">
+                        <td className="py-2 pr-2 text-surface-700 dark:text-surface-200">{item.protocol}</td>
+                        <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{item.state}</td>
+                        <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{item.localAddress}</td>
+                        <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{item.peerAddress}</td>
+                        <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{item.recvQ}</td>
+                        <td className="py-2 pr-2 text-surface-600 dark:text-surface-300">{item.sendQ}</td>
+                        <td className="py-2 text-surface-600 dark:text-surface-300 break-all">{item.process || "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className="h-full min-h-0 overflow-y-auto bg-surface-50 dark:bg-surface-950">
+      <div className="sticky top-0 z-10 h-12 px-4 border-b border-surface-200 dark:border-surface-800 bg-surface-50/95 dark:bg-surface-950/95 backdrop-blur-sm flex items-center justify-between">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-surface-900 dark:text-surface-100 truncate">
+            {session?.serverName || "未选择会话"} · {SERVER_DETAIL_LABELS[tab.kind]}
+          </p>
+          <p className="text-xs text-surface-500 dark:text-surface-400">
+            {tab.kind === "overview" ? "系统信息约 3 秒刷新" : tab.kind === "memory" ? "内存约 3 秒刷新" : tab.kind === "disk" ? "磁盘约 3 秒刷新（文件系统约 8 秒刷新）" : "高频实时视图约 2 秒刷新"}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onRefresh}
+            disabled={!isConnected || isLoading}
+            className="px-2.5 h-7 rounded-md border border-surface-200 dark:border-surface-700 text-xs text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {isLoading ? "刷新中..." : "刷新"}
+          </button>
+          <button
+            onClick={onBackToTerminal}
+            className="px-2.5 h-7 rounded-md border border-surface-200 dark:border-surface-700 text-xs text-surface-600 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800"
+          >
+            返回终端
+          </button>
+        </div>
+      </div>
+
+      <div className="p-4 space-y-4">
+        {!session && (
+          <div className="text-sm text-surface-500 dark:text-surface-400">请选择一个会话查看详情。</div>
+        )}
+
+        {session && !isConnected && (
+          <div className="text-sm text-surface-500 dark:text-surface-400">会话连接成功后将自动加载详细信息。</div>
+        )}
+
+        {session && isConnected && (tab.kind === "overview" || tab.kind === "memory" || tab.kind === "disk") && !info && !infoError && (
+          <div className="text-sm text-surface-500 dark:text-surface-400">正在加载详情...</div>
+        )}
+
+        {session && isConnected && (tab.kind === "overview" || tab.kind === "memory" || tab.kind === "disk") && infoError && !info && (
+          <div className="rounded-lg border border-red-200 dark:border-red-900/40 bg-red-50 dark:bg-red-950/20 p-3 text-sm text-red-600 dark:text-red-300 break-words">
+            获取服务器信息失败: {infoError}
+          </div>
+        )}
+
+        {session && isConnected && (
+          <>
+            {(tab.kind === "processes" || tab.kind === "network") && isLoading && (
+              <div className="text-sm text-surface-500 dark:text-surface-400">正在刷新列表...</div>
+            )}
+            {renderDetailContent()}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function EmptyTerminal({ onNewConnection }: { onNewConnection: () => void }) {
   return (
-    <div className="h-full flex flex-col items-center justify-center text-surface-400 dark:text-surface-500">
+    <div className="w-full h-full flex flex-col items-center justify-center text-center text-surface-400 dark:text-surface-500">
       <div className="w-20 h-20 rounded-2xl bg-surface-200 dark:bg-surface-800/50 flex items-center justify-center mb-6 text-primary-600 dark:text-primary-400">
         <TerminalIcon className="w-10 h-10 opacity-60" />
       </div>

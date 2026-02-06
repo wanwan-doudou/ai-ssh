@@ -37,6 +37,69 @@ export interface TerminalSession {
   createdAt: number;
 }
 
+// 服务器运行时信息
+export interface ServerRuntimeInfo {
+  host: string;
+  os: string;
+  kernel: string;
+  kernelName: string;
+  kernelVersion: string;
+  architecture: string;
+  uptime: string;
+  cpuModel: string;
+  cpuCores: number;
+  loadAvg: string;
+  memoryTotalKb: number;
+  memoryUsedKb: number;
+  memoryAvailableKb: number;
+  swapTotalKb: number;
+  swapUsedKb: number;
+  cpuUserPercent: number;
+  cpuNicePercent: number;
+  cpuSystemPercent: number;
+  cpuIdlePercent: number;
+  cpuIowaitPercent: number;
+  cpuIrqPercent: number;
+  cpuSoftirqPercent: number;
+  cpuStealPercent: number;
+  diskTotalKb: number;
+  diskUsedKb: number;
+  diskUsePercent: number;
+  ipAddress: string;
+  netRxBytes: number;
+  netTxBytes: number;
+  collectedAt: number;
+}
+
+export interface ServerProcessInfo {
+  pid: number;
+  user: string;
+  memoryKb: number;
+  cpuPercent: number;
+  name: string;
+  command: string;
+}
+
+export interface ServerNetworkConnection {
+  protocol: string;
+  state: string;
+  recvQ: number;
+  sendQ: number;
+  localAddress: string;
+  peerAddress: string;
+  process: string;
+}
+
+export interface ServerFilesystemInfo {
+  fileSystem: string;
+  fsType: string;
+  sizeKb: number;
+  usedKb: number;
+  availKb: number;
+  usePercent: number;
+  mountPoint: string;
+}
+
 // 通用响应
 export interface ApiResponse<T> {
   success: boolean;

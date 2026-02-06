@@ -2,11 +2,13 @@ import { useState, useEffect } from "react";
 import { Sidebar } from "./components/layout/Sidebar";
 import { MainContent } from "./components/layout/MainContent";
 import { useThemeStore } from "./stores/themeStore";
+import { useProviderStore } from "./stores/providerStore";
 import { FileEditorWindow } from "./components/editor/FileEditorWindow";
 
 function App() {
   const [activeView, setActiveView] = useState<"servers" | "providers" | "terminal">("servers");
   const { theme } = useThemeStore();
+  const fetchProviders = useProviderStore((state) => state.fetchProviders);
   const [isEditorMode, setIsEditorMode] = useState(false);
 
   useEffect(() => {
@@ -25,6 +27,10 @@ function App() {
     }
   }, [theme]);
 
+  useEffect(() => {
+    fetchProviders();
+  }, [fetchProviders]);
+
   // 如果是编辑器模式，渲染独立编辑器窗口
   if (isEditorMode) {
     return <FileEditorWindow />;
@@ -32,7 +38,7 @@ function App() {
 
   // Using bg-surface-50 for light mode (clean look) and bg-surface-950 for dark mode
   return (
-    <div className="flex h-full bg-surface-50 dark:bg-surface-950 text-surface-900 dark:text-surface-100 transition-colors duration-300">
+    <div className="relative isolate flex h-full bg-surface-50 dark:bg-surface-950 text-surface-900 dark:text-surface-100 transition-colors duration-300">
       {/* 侧边栏 */}
       <Sidebar activeView={activeView} onViewChange={setActiveView} />
       

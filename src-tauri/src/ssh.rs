@@ -69,8 +69,7 @@ struct SshSessionData {
     write_half: Arc<Mutex<ChannelWriteHalf<client::Msg>>>,
     running: Arc<RwLock<bool>>,
     // 保存 session 句柄，防止被 drop 导致事件循环停止
-    #[allow(dead_code)]
-    session_handle: client::Handle<SshClientHandler>,
+    session_handle: Arc<Mutex<client::Handle<SshClientHandler>>>,
 }
 
 /// SSH 会话元数据（简化版，无回压）
@@ -240,10 +239,14 @@ impl SshManager {
             }
         }
 
-        let channel = session
-            .channel_open_session()
-            .await
-            .map_err(|e| format!("打开通道失败: {:?}", e))?;
+        let session_handle = Arc::new(Mutex::new(session));
+        let channel = {
+            let handle = session_handle.lock().await;
+            handle
+                .channel_open_session()
+                .await
+                .map_err(|e| format!("打开通道失败: {:?}", e))?
+        };
 
         println!("[SSH] 通道已打开，正在请求 PTY...");
 
@@ -344,7 +347,7 @@ impl SshManager {
         let session_data = Arc::new(Mutex::new(Some(SshSessionData {
             write_half: shared_write_half,
             running: running.clone(),
-            session_handle: session,  // 保存 session，防止被 drop
+            session_handle: session_handle.clone(),  // 保存 session，防止被 drop
         })));
 
         {
@@ -373,6 +376,55 @@ impl SshManager {
         
         println!("[SSH] write 完成 session={}", session_id);
         Ok(())
+    }
+
+    /// 在现有 SSH 会话里执行一次性命令并返回输出
+    pub async fn execute_command(&self, session_id: &str, command: &str) -> Result<String, String> {
+        let session_handle = {
+            let sessions = self.sessions.lock().await;
+            let session_meta = sessions.get(session_id).ok_or("会话不存在")?;
+            let session_data = session_meta.session_data.lock().await;
+            let data = session_data.as_ref().ok_or("会话已关闭")?;
+            data.session_handle.clone()
+        };
+
+        let mut channel = {
+            let handle = session_handle.lock().await;
+            handle
+                .channel_open_session()
+                .await
+                .map_err(|e| format!("打开命令通道失败: {:?}", e))?
+        };
+
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| format!("执行命令失败: {:?}", e))?;
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut exit_status: Option<u32> = None;
+
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+                ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { exit_status: status } => exit_status = Some(status),
+                ChannelMsg::Eof | ChannelMsg::Close => {}
+                _ => {}
+            }
+        }
+
+        let stdout_text = String::from_utf8_lossy(&stdout).trim().to_string();
+        let stderr_text = String::from_utf8_lossy(&stderr).trim().to_string();
+        if let Some(status) = exit_status {
+            if status != 0 {
+                let detail = if !stderr_text.is_empty() { stderr_text } else { stdout_text };
+                return Err(format!("命令执行失败 (退出码 {}): {}", status, detail));
+            }
+        }
+
+        Ok(stdout_text)
     }
 
     /// 调整终端大小

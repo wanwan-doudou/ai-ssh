@@ -72,6 +72,10 @@ pub fn run() {
             commands::ssh::write_ssh,
             commands::ssh::resize_ssh,
             commands::ssh::send_ssh_command,
+            commands::ssh::get_server_runtime_info,
+            commands::ssh::get_server_process_list,
+            commands::ssh::get_server_network_connections,
+            commands::ssh::get_server_filesystems,
             // AI Chat 命令
             commands::ai_chat::ai_chat,
             commands::ai_chat::ai_chat_stream,
