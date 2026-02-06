@@ -65,6 +65,56 @@ const lightTheme = {
   brightWhite: "#1e293b", // 深灰色 (slate-800)
 };
 
+type ThemeMode = 'light' | 'dark';
+
+const getTerminalTheme = (themeMode: ThemeMode) => (
+  themeMode === 'dark' ? { ...darkTheme } : { ...lightTheme }
+);
+
+const applyTerminalTheme = (term: any, container: HTMLDivElement, themeMode: ThemeMode) => {
+  const nextTheme = getTerminalTheme(themeMode);
+  const bgColor = nextTheme.background || '#000000';
+  const fgColor = nextTheme.foreground || '#ffffff';
+
+  // 不要整体替换 options（会把 cols/rows 带回去并触发 xterm 报错）
+  try {
+    term.options.theme = nextTheme;
+    term.options.minimumContrastRatio = themeMode === 'light' ? 4.5 : 1;
+  } catch (e) {
+    console.warn('[TerminalView] Failed to update terminal theme options:', e);
+  }
+
+  container.style.setProperty('background-color', bgColor, 'important');
+  container.style.setProperty('color', fgColor, 'important');
+
+  const xtermElements = container.querySelectorAll('.xterm, .xterm-viewport, .xterm-screen, .xterm-rows');
+  xtermElements.forEach((el) => {
+    const element = el as HTMLElement;
+    element.style.setProperty('background-color', bgColor, 'important');
+    element.style.setProperty('color', fgColor, 'important');
+  });
+
+  if (typeof term.clearTextureAtlas === 'function') {
+    term.clearTextureAtlas();
+  }
+
+  if (typeof term.refresh === 'function' && term.rows > 0) {
+    term.refresh(0, term.rows - 1);
+    requestAnimationFrame(() => {
+      try {
+        if (typeof term.clearTextureAtlas === 'function') {
+          term.clearTextureAtlas();
+        }
+        if (typeof term.refresh === 'function' && term.rows > 0) {
+          term.refresh(0, term.rows - 1);
+        }
+      } catch (e) {
+        console.warn('[TerminalView] Theme repaint skipped:', e);
+      }
+    });
+  }
+};
+
 // 自定义相等性检查函数：忽略 buffer 字段的变化
 // 只有当 id, serverId, serverName, isConnected, bufferRestored 发生变化时才触发更新
 const sessionsEquality = (prev: any[], next: any[]) => {
@@ -431,51 +481,8 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
     if (terminalInstanceRef.current && terminalRef.current) {
       const term = terminalInstanceRef.current;
       const container = terminalRef.current;
-      
-      // 创建新的主题对象（xterm.js 使用引用比较）
-      const newTheme = theme === 'dark' ? { ...darkTheme } : { ...lightTheme };
-      const bgColor = newTheme.background || '#000000';
-      
       console.log('[TerminalView] Applying theme:', theme);
-      
-      // 1. 设置主题 - 只修改 theme 属性，不整体替换 options
-      term.options.theme = newTheme;
-      
-      // 2. DOM 操作更新背景色
-      container.style.backgroundColor = bgColor;
-      
-      const viewport = container.querySelector('.xterm-viewport') as HTMLElement;
-      if (viewport) {
-        viewport.style.backgroundColor = bgColor;
-      }
-      
-      const screen = container.querySelector('.xterm-screen') as HTMLElement;
-      if (screen) {
-        screen.style.backgroundColor = bgColor;
-      }
-      
-      // 3. 清除字形纹理缓存
-      if (typeof term.clearTextureAtlas === 'function') {
-        term.clearTextureAtlas();
-      }
-      
-      // 4. 刷新终端
-      term.refresh(0, term.rows - 1);
-      
-      // 5. 使用多次延迟刷新确保渲染更新
-      const refreshAttempts = [0, 50, 100, 200];
-      refreshAttempts.forEach(delay => {
-        setTimeout(() => {
-          if (terminalInstanceRef.current) {
-            if (typeof terminalInstanceRef.current.clearTextureAtlas === 'function') {
-              terminalInstanceRef.current.clearTextureAtlas();
-            }
-            terminalInstanceRef.current.refresh(0, terminalInstanceRef.current.rows - 1);
-          }
-        }, delay);
-      });
-      
-      console.log('[TerminalView] Theme update scheduled');
+      applyTerminalTheme(term, container, theme);
     }
   }, [theme]);
 
@@ -522,11 +529,11 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
       const { Terminal } = await import("@xterm/xterm");
       const { FitAddon } = await import("@xterm/addon-fit");
       const { WebLinksAddon } = await import("@xterm/addon-web-links");
-      const { WebglAddon } = await import("@xterm/addon-webgl");
       
       await import("@xterm/xterm/css/xterm.css");
 
       if (!terminalRef.current) return;
+      const currentTheme = useThemeStore.getState().theme;
 
       terminal = new Terminal({
         fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
@@ -535,8 +542,9 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
         cursorBlink: true,
         cursorStyle: "bar",
         scrollback: 10000,
-        theme: useThemeStore.getState().theme === 'dark' ? darkTheme : lightTheme,
-        allowTransparency: true, // 开启透明，使用容器背景色，解决主题切换背景不更新的问题
+        theme: getTerminalTheme(currentTheme),
+        minimumContrastRatio: currentTheme === 'light' ? 4.5 : 1,
+        allowTransparency: false, // 关闭透明，让 xterm.js 完全控制背景色
       });
 
       fitAddon = new FitAddon();
@@ -566,11 +574,8 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
 
       terminalInstanceRef.current = terminal;
       fitAddonRef.current = fitAddon;
-      
-      // 设置容器背景色与终端一致
-      if (terminalRef.current) {
-        terminalRef.current.style.backgroundColor = theme === 'dark' ? darkTheme.background : lightTheme.background;
-      }
+
+      applyTerminalTheme(terminal, terminalRef.current, currentTheme);
 
       // 如果有缓存的输出且尚未恢复过，先恢复显示
       // 使用 store 中的 bufferRestored 状态来追踪，避免页面切换时重复恢复

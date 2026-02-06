@@ -577,7 +577,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
       />
 
       {/* 右侧：原有内容 (包裹在 flex-col 容器中) */}
-      <div className="relative flex-1 flex flex-col min-w-0 bg-surface-50 dark:bg-surface-900/30">
+      <div className="relative flex-1 flex flex-col min-w-0 bg-transparent">
         {/* 工具栏 */}
         <div className="file-explorer-toolbar">
           <button onClick={handleGoUp} title="返回上级目录" disabled={session.currentDir === '/'}>

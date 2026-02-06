@@ -141,7 +141,8 @@ body {
 
 /* 终端样式覆盖 */
 .terminal-container {
-  @apply w-full h-full bg-surface-50 dark:bg-surface-950 rounded-lg overflow-hidden;
+  @apply w-full h-full rounded-lg overflow-hidden;
+  /* 背景色通过 JS 动态设置，与 xterm.js 主题保持一致 */
 }
 
 .terminal-container .xterm {

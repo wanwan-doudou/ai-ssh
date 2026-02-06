@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(pnpm install)"
+      "Bash(pnpm install)",
+      "mcp__mcpServers__uiux_suggest",
+      "Bash(pnpm dev)"
     ]
   }
 }

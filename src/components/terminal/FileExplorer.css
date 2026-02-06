@@ -5,8 +5,8 @@
 .file-explorer {
   display: flex;
   flex-direction: column;
-  background: var(--bg-primary, #1e1e1e);
-  border-top: 1px solid var(--border-color, #333);
+  background: var(--bg-primary, #0b1220);
+  border-top: 1px solid var(--border-color, #1e293b);
   font-size: 13px;
   overflow: hidden;
 }
@@ -22,19 +22,31 @@
   --border-color: #ddd;
   --toolbar-bg: #f0f0f0;
   --danger-color: #dc3545;
+  --accent-color: #0d9488;
+  --accent-hover: #0f766e;
+  --accent-soft: rgba(13, 148, 136, 0.12);
+  --scrollbar-thumb: #cbd5e1;
+  --scrollbar-thumb-hover: #94a3b8;
+  --row-divider: rgba(148, 163, 184, 0.18);
 }
 
 /* 深色主题 */
 .file-explorer.dark {
-  --bg-primary: #1e1e1e;
-  --bg-secondary: #252526;
-  --bg-hover: #2a2d2e;
-  --bg-selected: #094771;
-  --text-primary: #cccccc;
-  --text-secondary: #888888;
-  --border-color: #333;
-  --toolbar-bg: #252526;
-  --danger-color: #f14c4c;
+  --bg-primary: #0b1220;
+  --bg-secondary: #101a2d;
+  --bg-hover: #17233a;
+  --bg-selected: rgba(20, 184, 166, 0.16);
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --border-color: #1e293b;
+  --toolbar-bg: #0f172a;
+  --danger-color: #f87171;
+  --accent-color: #14b8a6;
+  --accent-hover: #0d9488;
+  --accent-soft: rgba(20, 184, 166, 0.14);
+  --scrollbar-thumb: #334155;
+  --scrollbar-thumb-hover: #475569;
+  --row-divider: rgba(51, 65, 85, 0.6);
 }
 
 /* 工具栏 */
@@ -103,12 +115,12 @@
 
 .new-folder-dialog input:focus {
   outline: none;
-  border-color: #007acc;
+  border-color: var(--accent-color);
 }
 
 .new-folder-dialog button {
   padding: 6px 14px;
-  background: #007acc;
+  background: var(--accent-color);
   border: none;
   border-radius: 4px;
   color: #fff;
@@ -117,7 +129,7 @@
 }
 
 .new-folder-dialog button:hover {
-  background: #005999;
+  background: var(--accent-hover);
 }
 
 .new-folder-dialog button:last-child {
@@ -141,8 +153,8 @@
 
 /* 拖拽上传状态 */
 .file-list.drag-over {
-  background: rgba(0, 122, 204, 0.1);
-  border: 2px dashed #007acc;
+  background: var(--accent-soft);
+  border: 2px dashed var(--accent-color);
   border-radius: 4px;
 }
 
@@ -187,6 +199,7 @@
   cursor: pointer;
   transition: background 0.1s ease;
   color: var(--text-primary);
+  border-bottom: 1px solid var(--row-divider);
 }
 
 .file-item:hover {
@@ -256,7 +269,7 @@
   flex: 1;
   padding: 4px 8px;
   background: var(--bg-primary);
-  border: 1px solid #007acc;
+  border: 1px solid var(--accent-color);
   border-radius: 3px;
   color: var(--text-primary);
   font-size: 13px;
@@ -301,7 +314,7 @@
 
 .file-explorer-error button {
   padding: 6px 16px;
-  background: #007acc;
+  background: var(--accent-color);
   border: none;
   border-radius: 4px;
   color: #fff;
@@ -314,7 +327,7 @@
   width: 20px;
   height: 20px;
   border: 2px solid var(--border-color);
-  border-top-color: #007acc;
+  border-top-color: var(--accent-color);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -377,10 +390,10 @@
 }
 
 .file-list::-webkit-scrollbar-thumb {
-  background: var(--border-color);
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
 }
 
 .file-list::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: var(--scrollbar-thumb-hover);
 }

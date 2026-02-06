@@ -6,6 +6,8 @@ target/
 dist/
 dist-ssr/
 
+nul
+
 # 日志
 *.log
 npm-debug.log*
