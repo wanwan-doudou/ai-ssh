@@ -175,7 +175,7 @@ function ServerCard({ server, onEdit, onConnect }: ServerCardProps) {
       
       <div className="mt-4 flex items-center justify-between">
         <span className="text-xs text-surface-500">
-          {server.username}@{server.authType === "password" ? "密码" : "密钥"}
+          {server.username}@{server.authType === "password" ? "密码" : "密钥"} · {server.deviceType === "network" ? "网络设备" : "Linux"}
         </span>
         <button 
           onClick={onConnect}

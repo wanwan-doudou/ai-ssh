@@ -29,12 +29,21 @@ export const useServerStore = create<ServerStore>()((set, get) => ({
       // 调用后端 API 获取服务器列表
       const servers = await invoke<Server[]>('get_servers');
       // 转换后端数据格式为前端格式
-      const formattedServers = servers.map(s => ({
-        ...s,
-        // 将后端的 auth_type 和 private_key_path 转换为前端的 camelCase 格式
-        authType: (s as any).auth_type === 'private_key' ? 'privateKey' as const : 'password' as const,
-        privateKeyPath: (s as any).private_key_path,
-      }));
+      const formattedServers = servers.map((s: any) => {
+        const rawAuthType = s.authType ?? s.auth_type ?? 'password';
+        const rawDeviceType = s.deviceType ?? s.device_type ?? 'linux';
+        const rawPrivateKeyPath = s.privateKeyPath ?? s.private_key_path ?? undefined;
+        return {
+          ...s,
+          authType: rawAuthType === 'privateKey' || rawAuthType === 'private_key'
+            ? 'privateKey' as const
+            : 'password' as const,
+          deviceType: rawDeviceType === 'network' || rawDeviceType === 'network_device' || rawDeviceType === 'networkDevice'
+            ? 'network' as const
+            : 'linux' as const,
+          privateKeyPath: rawPrivateKeyPath,
+        };
+      });
       set({ servers: formattedServers, isLoading: false });
     } catch (err) {
       console.error('获取服务器列表失败:', err);
@@ -50,7 +59,8 @@ export const useServerStore = create<ServerStore>()((set, get) => ({
         host: serverData.host,
         port: serverData.port,
         username: serverData.username,
-        authType: serverData.authType === 'privateKey' ? 'private_key' : 'password',
+        authType: serverData.authType === 'privateKey' ? 'privateKey' : 'password',
+        deviceType: serverData.deviceType,
         password: serverData.password || null,
         privateKeyPath: serverData.privateKeyPath || null,
         group: serverData.group || null,
@@ -80,7 +90,8 @@ export const useServerStore = create<ServerStore>()((set, get) => ({
         host: merged.host,
         port: merged.port,
         username: merged.username,
-        authType: merged.authType === 'privateKey' ? 'private_key' : 'password',
+        authType: merged.authType === 'privateKey' ? 'privateKey' : 'password',
+        deviceType: merged.deviceType,
         password: merged.password || null,
         privateKeyPath: merged.privateKeyPath || null,
         group: merged.group || null,

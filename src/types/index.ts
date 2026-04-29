@@ -6,6 +6,7 @@ export interface Server {
   port: number;
   username: string;
   authType: "password" | "privateKey";
+  deviceType: "linux" | "network";
   password?: string;
   privateKeyPath?: string;
   group?: string;
@@ -116,7 +117,7 @@ export interface ChatMessage {
   // AI 建议执行的命令
   command?: string;
   // 命令执行状态
-  commandStatus?: 'pending' | 'approved' | 'rejected' | 'executed';
+  commandStatus?: 'pending' | 'approved' | 'rejected' | 'executed' | 'running' | 'completed' | 'failed' | 'cancelled' | 'timeout';
 }
 
 // AI 操作模式

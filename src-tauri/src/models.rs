@@ -18,6 +18,7 @@ pub struct Server {
     pub private_key_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    pub device_type: DeviceType,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -45,8 +46,39 @@ impl std::str::FromStr for AuthType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "password" => Ok(AuthType::Password),
-            "privateKey" => Ok(AuthType::PrivateKey),
+            "privateKey" | "private_key" => Ok(AuthType::PrivateKey),
             _ => Err(format!("未知的认证类型: {}", s)),
+        }
+    }
+}
+
+/// 设备类型
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DeviceType {
+    Linux,
+    Network,
+}
+
+impl std::fmt::Display for DeviceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeviceType::Linux => write!(f, "linux"),
+            DeviceType::Network => write!(f, "network"),
+        }
+    }
+}
+
+impl std::str::FromStr for DeviceType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "linux" => Ok(DeviceType::Linux),
+            "network" | "networkdevice" | "network-device" | "network_device" => {
+                Ok(DeviceType::Network)
+            }
+            _ => Err(format!("未知的设备类型: {}", s)),
         }
     }
 }
@@ -107,12 +139,3 @@ impl std::str::FromStr for ProviderType {
     }
 }
 
-/// SSH 会话
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SshSession {
-    pub id: String,
-    pub server_id: String,
-    pub is_connected: bool,
-    pub created_at: i64,
-}

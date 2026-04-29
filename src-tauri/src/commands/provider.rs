@@ -1,6 +1,10 @@
 //! Provider 管理命令
 
 use crate::models::{Provider, ProviderType};
+use crate::provider_utils::{
+    anthropic_messages_url, gemini_models_url, openai_compatible_url, openai_models_url,
+    DEFAULT_CLAUDE_MODEL,
+};
 use crate::AppState;
 use rusqlite::params;
 use tauri::State;
@@ -153,7 +157,7 @@ pub async fn test_provider_connection(
     // 根据 provider 类型选择测试端点
     let result = match provider_type.to_lowercase().as_str() {
         "claude" => test_claude(&client, &api_key, base_url).await,
-        "openai" | "codex" => test_openai(&client, &api_key, base_url).await,
+        "openai" => test_openai(&client, &api_key, base_url).await,
         "gemini" => test_gemini(&client, &api_key, base_url).await,
         "custom" => {
             if let Some(url) = base_url {
@@ -162,6 +166,7 @@ pub async fn test_provider_connection(
                 Err("自定义类型需要提供 Base URL".to_string())
             }
         }
+        "codex" => Err("Codex Provider 暂不支持普通聊天接口；请使用 OpenAI Provider。".to_string()),
         _ => Err(format!("不支持的 Provider 类型: {}", provider_type)),
     };
     
@@ -181,39 +186,13 @@ pub async fn test_provider_connection(
     }
 }
 
-/// 测试 Claude API
-/// 如果使用自定义 base_url（代理服务），优先尝试 OpenAI 兼容格式
+/// 测试 Claude 原生 Messages API
 async fn test_claude(
     client: &reqwest::Client,
     api_key: &str,
     base_url: Option<String>,
 ) -> Result<String, String> {
-    let is_proxy = base_url.is_some() && !base_url.as_ref().unwrap().contains("anthropic.com");
-    
-    if is_proxy {
-        // 代理服务通常使用 OpenAI 兼容格式，尝试 /v1/models 端点
-        let url = base_url.as_ref().unwrap();
-        let endpoint = format!("{}/v1/models", url.trim_end_matches('/'));
-        
-        let response = client
-            .get(&endpoint)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .send()
-            .await
-            .map_err(|e| format!("网络请求失败: {}", e))?;
-        
-        let status = response.status();
-        if status.is_success() {
-            return Ok("Claude API 连接成功 (代理)".to_string());
-        } else if status.as_u16() == 401 {
-            return Err("API Key 无效或已过期".to_string());
-        }
-        // 如果 /v1/models 失败，继续尝试官方格式
-    }
-    
-    // 官方 Anthropic API 格式
-    let url = base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string());
-    let endpoint = format!("{}/v1/messages", url.trim_end_matches('/'));
+    let endpoint = anthropic_messages_url(base_url.as_deref());
     
     // 发送最小化的测试请求
     let response = client
@@ -222,7 +201,7 @@ async fn test_claude(
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
         .json(&serde_json::json!({
-            "model": "claude-3-haiku-20240307",
+            "model": DEFAULT_CLAUDE_MODEL,
             "max_tokens": 1,
             "messages": [{"role": "user", "content": "Hi"}]
         }))
@@ -249,9 +228,8 @@ async fn test_openai(
     api_key: &str,
     base_url: Option<String>,
 ) -> Result<String, String> {
-    let url = base_url.unwrap_or_else(|| "https://api.openai.com".to_string());
     // 使用 models 端点测试，不消耗 tokens
-    let endpoint = format!("{}/v1/models", url);
+    let endpoint = openai_models_url(base_url.as_deref());
     
     let response = client
         .get(&endpoint)
@@ -279,12 +257,12 @@ async fn test_gemini(
     api_key: &str,
     base_url: Option<String>,
 ) -> Result<String, String> {
-    let url = base_url.unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
     // 使用 models 列表端点测试
-    let endpoint = format!("{}/v1beta/models?key={}", url, api_key);
+    let endpoint = gemini_models_url(base_url.as_deref());
     
     let response = client
         .get(&endpoint)
+        .header("x-goog-api-key", api_key)
         .send()
         .await
         .map_err(|e| format!("网络请求失败: {}", e))?;
@@ -307,7 +285,7 @@ async fn test_custom(
     base_url: &str,
 ) -> Result<String, String> {
     // 尝试 OpenAI 兼容的 models 端点
-    let endpoint = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let endpoint = openai_compatible_url(Some(base_url), base_url, "models");
     
     let response = client
         .get(&endpoint)

@@ -1,8 +1,11 @@
 use crate::models::{Provider, ProviderType};
+use crate::provider_utils::{
+    anthropic_messages_url, default_model_for_provider, gemini_generate_content_url,
+    openai_chat_completions_url,
+};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::{State, AppHandle, Emitter};
-use std::sync::Arc;
 use rusqlite::params;
 use futures::StreamExt;
 
@@ -10,12 +13,6 @@ use futures::StreamExt;
 pub struct AiChatResponse {
     pub content: String,
     pub command: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
 }
 
 /// 历史消息结构（用于接收前端传来的历史）
@@ -33,6 +30,9 @@ pub async fn ai_chat(
     session_id: String,
     history: Option<Vec<HistoryMessage>>,  // 新增：接收历史消息
 ) -> Result<AiChatResponse, String> {
+    // 保留 session_id 参数以维持前端 invoke 契约；非流式接口当前不按会话区分处理。
+    let _ = &session_id;
+
     // 1. 获取 Provider 信息
     let provider = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -67,7 +67,8 @@ docker ps
 ```
 4. 不要同时给多个命令
 5. 分析命令输出时，提取关键信息，给出简明总结
-6. 请结合对话上下文理解用户意图，保持对话连贯性"#;
+6. 请结合对话上下文理解用户意图，保持对话连贯性
+7. 如果上下文提示某个命令仍在执行、尚未完成，不要把暂无输出判断为失败或无结果；请明确说明命令还没结束，只能基于当前已有输出判断"#;
 
     // 3. 构建消息历史
     let history_messages = history.unwrap_or_default();
@@ -85,8 +86,12 @@ docker ps
         ProviderType::Claude => {
             call_claude(&client, &provider, system_prompt, &message, &history_messages).await?
         }
-        // Add other providers as needed
-        _ => return Err(format!("Provider type {:?} not yet supported for chat", provider.provider_type)),
+        ProviderType::Gemini => {
+            call_gemini(&client, &provider, system_prompt, &message, &history_messages).await?
+        }
+        ProviderType::Codex => {
+            return Err("Codex Provider 暂不支持普通 Chat Completions。请使用 OpenAI Provider，或等后续接入 Responses API。".to_string());
+        }
     };
 
     // 5. 解析响应 (提取 Command)
@@ -153,7 +158,8 @@ docker ps
 ```
 4. 不要同时给多个命令
 5. 分析命令输出时，提取关键信息，给出简明总结
-6. 请结合对话上下文理解用户意图，保持对话连贯性"#;
+6. 请结合对话上下文理解用户意图，保持对话连贯性
+7. 如果上下文提示某个命令仍在执行、尚未完成，不要把暂无输出判断为失败或无结果；请明确说明命令还没结束，只能基于当前已有输出判断"#;
 
     // 3. 构建消息历史
     let history_messages = history.unwrap_or_default();
@@ -172,7 +178,12 @@ docker ps
         ProviderType::Claude => {
             call_claude_stream(&app, &client, &provider, system_prompt, &message, &history_messages, &event_name).await
         }
-        _ => Err(format!("Provider type {:?} not yet supported for streaming", provider.provider_type)),
+        ProviderType::Gemini => {
+            call_gemini_stream(&app, &client, &provider, system_prompt, &message, &history_messages, &event_name).await
+        }
+        ProviderType::Codex => {
+            Err("Codex Provider 暂不支持普通 Chat Completions。请使用 OpenAI Provider，或等后续接入 Responses API。".to_string())
+        }
     };
 
     // 6. 处理结果
@@ -196,9 +207,12 @@ async fn call_openai_compatible(
     user_message: &str,
     history: &[HistoryMessage],  // 新增：历史消息
 ) -> Result<String, String> {
-    let base_url = provider.base_url.clone().unwrap_or_else(|| "https://api.openai.com".to_string());
-    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
-    let model = provider.model.clone().unwrap_or_else(|| "gpt-3.5-turbo".to_string());
+    let url = openai_chat_completions_url(provider.base_url.as_deref());
+    let model = provider
+        .model
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_model_for_provider(&provider.provider_type).to_string());
 
     // 构建消息数组：system + 历史 + 当前用户消息
     let mut messages = vec![
@@ -250,9 +264,12 @@ async fn call_claude(
     user_message: &str,
     history: &[HistoryMessage],  // 新增：历史消息
 ) -> Result<String, String> {
-    let base_url = provider.base_url.clone().unwrap_or_else(|| "https://api.anthropic.com".to_string());
-    let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
-    let model = provider.model.clone().unwrap_or_else(|| "claude-3-haiku-20240307".to_string());
+    let url = anthropic_messages_url(provider.base_url.as_deref());
+    let model = provider
+        .model
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_model_for_provider(&provider.provider_type).to_string());
 
     // 构建消息数组：历史 + 当前用户消息
     let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -308,9 +325,12 @@ async fn call_openai_compatible_stream(
     history: &[HistoryMessage],
     event_name: &str,
 ) -> Result<String, String> {
-    let base_url = provider.base_url.clone().unwrap_or_else(|| "https://api.openai.com".to_string());
-    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
-    let model = provider.model.clone().unwrap_or_else(|| "gpt-3.5-turbo".to_string());
+    let url = openai_chat_completions_url(provider.base_url.as_deref());
+    let model = provider
+        .model
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_model_for_provider(&provider.provider_type).to_string());
 
     // 构建消息数组
     let mut messages = vec![
@@ -405,9 +425,12 @@ async fn call_claude_stream(
     history: &[HistoryMessage],
     event_name: &str,
 ) -> Result<String, String> {
-    let base_url = provider.base_url.clone().unwrap_or_else(|| "https://api.anthropic.com".to_string());
-    let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
-    let model = provider.model.clone().unwrap_or_else(|| "claude-3-haiku-20240307".to_string());
+    let url = anthropic_messages_url(provider.base_url.as_deref());
+    let model = provider
+        .model
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_model_for_provider(&provider.provider_type).to_string());
 
     // 构建消息数组
     let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -482,6 +505,190 @@ async fn call_claude_stream(
     }
 
     // 解析命令并发送完成事件
+    let (_, command) = parse_ai_response(&full_content);
+    let _ = app.emit(event_name, StreamEvent {
+        chunk: None,
+        done: true,
+        error: None,
+        command,
+    });
+
+    Ok(full_content)
+}
+
+fn push_gemini_turn(turns: &mut Vec<(String, String)>, role: &str, content: &str) {
+    let content = content.trim();
+    if content.is_empty() {
+        return;
+    }
+
+    if let Some((last_role, last_content)) = turns.last_mut() {
+        if last_role == role {
+            last_content.push_str("\n\n");
+            last_content.push_str(content);
+            return;
+        }
+    }
+
+    turns.push((role.to_string(), content.to_string()));
+}
+
+fn build_gemini_contents(history: &[HistoryMessage], user_message: &str) -> Vec<serde_json::Value> {
+    let mut turns: Vec<(String, String)> = Vec::new();
+    let history_limit = history.len().saturating_sub(40);
+
+    for msg in history.iter().skip(history_limit) {
+        let role = match msg.role.as_str() {
+            "assistant" => "model",
+            "user" | "system" => "user",
+            _ => "user",
+        };
+        push_gemini_turn(&mut turns, role, &msg.content);
+    }
+
+    push_gemini_turn(&mut turns, "user", user_message);
+
+    turns
+        .into_iter()
+        .map(|(role, content)| {
+            serde_json::json!({
+                "role": role,
+                "parts": [{ "text": content }]
+            })
+        })
+        .collect()
+}
+
+fn build_gemini_body(
+    system_prompt: &str,
+    user_message: &str,
+    history: &[HistoryMessage],
+) -> serde_json::Value {
+    serde_json::json!({
+        "systemInstruction": {
+            "parts": [{ "text": system_prompt }]
+        },
+        "contents": build_gemini_contents(history, user_message),
+        "generationConfig": {
+            "maxOutputTokens": 8192
+        }
+    })
+}
+
+fn extract_gemini_text(json: &serde_json::Value) -> Option<String> {
+    let parts = json["candidates"][0]["content"]["parts"].as_array()?;
+    let text = parts
+        .iter()
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("");
+
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+async fn call_gemini(
+    client: &reqwest::Client,
+    provider: &Provider,
+    system_prompt: &str,
+    user_message: &str,
+    history: &[HistoryMessage],
+) -> Result<String, String> {
+    let model = provider
+        .model
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_model_for_provider(&provider.provider_type).to_string());
+    let url = gemini_generate_content_url(provider.base_url.as_deref(), &model, false);
+    let body = build_gemini_body(system_prompt, user_message, history);
+
+    let res = client
+        .post(&url)
+        .header("x-goog-api-key", &provider.api_key)
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("API Error {}: {}", status, body));
+    }
+
+    let json: serde_json::Value = res.json().await.map_err(|e| format!("Parse error: {}", e))?;
+    extract_gemini_text(&json).ok_or_else(|| "Invalid Gemini response format".to_string())
+}
+
+async fn call_gemini_stream(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    provider: &Provider,
+    system_prompt: &str,
+    user_message: &str,
+    history: &[HistoryMessage],
+    event_name: &str,
+) -> Result<String, String> {
+    let model = provider
+        .model
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_model_for_provider(&provider.provider_type).to_string());
+    let url = gemini_generate_content_url(provider.base_url.as_deref(), &model, true);
+    let body = build_gemini_body(system_prompt, user_message, history);
+
+    let res = client
+        .post(&url)
+        .header("x-goog-api-key", &provider.api_key)
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("API Error {}: {}", status, body));
+    }
+
+    let mut full_content = String::new();
+    let mut stream = res.bytes_stream();
+    let mut buffer = String::new();
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
+        let text = String::from_utf8_lossy(&chunk);
+        buffer.push_str(&text);
+
+        while let Some(line_end) = buffer.find('\n') {
+            let line = buffer[..line_end].trim().to_string();
+            buffer = buffer[line_end + 1..].to_string();
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    continue;
+                }
+
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(content) = extract_gemini_text(&json) {
+                        full_content.push_str(&content);
+                        let _ = app.emit(event_name, StreamEvent {
+                            chunk: Some(content),
+                            done: false,
+                            error: None,
+                            command: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     let (_, command) = parse_ai_response(&full_content);
     let _ = app.emit(event_name, StreamEvent {
         chunk: None,
@@ -597,6 +804,9 @@ pub async fn execute_command_via_ai(
     session_id: String,
     command: String
 ) -> Result<(), String> {
+    // 保留这些参数以维持 Tauri command 签名；当前前端直接调用 write_ssh 执行命令。
+    let _ = (&state, &session_id, &command);
+
     // 这个命令可能由前端 AI Panel 调用，或者用于其他自动化场景
     // 这里我们简单复用 ssh 模块的 write_ssh 逻辑，或者调用 state 中的 shared logic
     // 由于 commands::ssh 逻辑可能没公开，我们这里暂时仅作为占位

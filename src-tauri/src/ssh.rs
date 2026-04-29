@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
-use crate::models::{AuthType, Server};
+use crate::models::{AuthType, DeviceType, Server};
 
 /// SSH 客户端处理器
 /// 注意：数据接收现在通过 channel.wait() 实现，而不是 Handler 回调
@@ -76,6 +76,7 @@ struct SshSessionData {
 struct SshSessionMeta {
     #[allow(dead_code)]
     server_name: String,
+    device_type: DeviceType,
     session_data: Arc<Mutex<Option<SshSessionData>>>,
     write_tx: mpsc::UnboundedSender<String>,
 }
@@ -354,6 +355,7 @@ impl SshManager {
             let mut sessions = self.sessions.lock().await;
             sessions.insert(session_id.to_string(), SshSessionMeta {
                 server_name: server.name.clone(),
+                device_type: server.device_type.clone(),
                 session_data,
                 write_tx,
             });
@@ -376,6 +378,12 @@ impl SshManager {
         
         println!("[SSH] write 完成 session={}", session_id);
         Ok(())
+    }
+
+    /// 获取会话设备类型
+    pub async fn session_device_type(&self, session_id: &str) -> Option<DeviceType> {
+        let sessions = self.sessions.lock().await;
+        sessions.get(session_id).map(|meta| meta.device_type.clone())
     }
 
     /// 在现有 SSH 会话里执行一次性命令并返回输出

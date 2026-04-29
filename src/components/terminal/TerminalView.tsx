@@ -20,7 +20,10 @@ import {
 } from "lucide-react";
 import { useServerStore } from "@/stores/serverStore";
 import { useChatStore } from "@/stores/chatStore";
-import { useTerminalOutputStore } from "@/stores/terminalOutputStore";
+import {
+  stripInternalCommandControlLines,
+  useTerminalOutputStore
+} from "@/stores/terminalOutputStore";
 import { AiChatPanel } from "./AiChatPanel";
 import { ResizableDivider } from "./ResizableDivider";
 import { FileExplorer } from "./FileExplorer";
@@ -508,13 +511,15 @@ export function TerminalView() {
     };
   }, [activeSessionId, activeSession?.isConnected, activeDetailTab?.kind, fetchNetworkConnections]);
 
-  const handleExecuteCommand = (command: string) => {
+  const handleExecuteCommand = (command: string, options?: { appendNewline?: boolean }) => {
     if (!activeSessionId) return;
     
+    const data = options?.appendNewline === false ? command : `${command}\n`;
+
     // 调用后端执行命令
     invoke("write_ssh", {
       sessionId: activeSessionId,
-      data: command + "\n", // 自动添加换行符执行
+      data,
     }).catch(console.error);
   };
 
@@ -1596,26 +1601,31 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
   }, [theme]);
 
   // 存储同步引用 - 用于将数据懒加载同步到 Zustand store
-  const storeBufferRef = useRef<string>('');
-  const lastSyncTimeRef = useRef<number>(Date.now());
+  const outputStoreBufferRef = useRef<string>('');
+  const terminalStoreBufferRef = useRef<string>('');
 
   // 同步数据到 Store 的函数
   const syncToStore = useCallback(() => {
-    if (!storeBufferRef.current) return;
+    if (!outputStoreBufferRef.current && !terminalStoreBufferRef.current) return;
     
-    const dataToSync = storeBufferRef.current;
-    storeBufferRef.current = '';
-    lastSyncTimeRef.current = Date.now();
+    const outputDataToSync = outputStoreBufferRef.current;
+    const terminalDataToSync = terminalStoreBufferRef.current;
+    outputStoreBufferRef.current = '';
+    terminalStoreBufferRef.current = '';
     
     // 批量更新 Store
-    appendOutput(session.id, dataToSync);
-    appendSessionOutput(session.id, dataToSync);
+    if (outputDataToSync) {
+      appendOutput(session.id, outputDataToSync);
+    }
+    if (terminalDataToSync) {
+      appendSessionOutput(session.id, terminalDataToSync);
+    }
   }, [session.id, appendOutput, appendSessionOutput]);
 
   // 定时同步 Store (每 2 秒)
   useEffect(() => {
     const syncInterval = setInterval(() => {
-      if (storeBufferRef.current) {
+      if (outputStoreBufferRef.current || terminalStoreBufferRef.current) {
         syncToStore();
       }
     }, 2000);
@@ -1725,15 +1735,19 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
       unlistenOutput = await listen<string>(`ssh-output-${session.id}`, (event) => {
         if (terminal) {
           const data = event.payload;
+          const displayData = stripInternalCommandControlLines(data);
           
           // 1. 写入终端
-          terminal.write(data);
+          if (displayData) {
+            terminal.write(displayData);
+          }
           
           // 2. 累积到 Store 缓冲区（延迟同步）
-          storeBufferRef.current += data;
+          outputStoreBufferRef.current += data;
+          terminalStoreBufferRef.current += displayData;
           
           // 3. 检测目录变化（如 cd 命令）
-          const detectedDir = parseAndUpdateFromOutput(session.id, data);
+          const detectedDir = parseAndUpdateFromOutput(session.id, displayData);
           if (detectedDir && onDirectoryChange) {
             onDirectoryChange(detectedDir);
           }

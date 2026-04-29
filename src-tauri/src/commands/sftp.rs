@@ -2,7 +2,7 @@
 //!
 //! 提供文件浏览、上传、下载等 SFTP 功能的前端接口
 
-use crate::models::{AuthType, Server};
+use crate::models::{AuthType, DeviceType, Server};
 use crate::sftp::{FileEntry, SftpManager};
 use crate::AppState;
 use rusqlite::params;
@@ -13,7 +13,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tauri::State;
-use tokio::sync::{Mutex, MutexGuard};
 
 /// SFTP 状态
 pub struct SftpState {
@@ -50,7 +49,7 @@ pub async fn sftp_connect(
         let conn = app_state.db.lock().map_err(|e| e.to_string())?;
         
         let mut stmt = conn
-            .prepare("SELECT id, name, host, port, username, auth_type, password, private_key_path, group_name, created_at, updated_at FROM servers WHERE id = ?1")
+            .prepare("SELECT id, name, host, port, username, auth_type, password, private_key_path, group_name, device_type, created_at, updated_at FROM servers WHERE id = ?1")
             .map_err(|e| e.to_string())?;
         
         stmt.query_row(params![server_id], |row| {
@@ -64,12 +63,20 @@ pub async fn sftp_connect(
                 password: row.get(6)?,
                 private_key_path: row.get(7)?,
                 group: row.get(8)?,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
+                device_type: row
+                    .get::<_, String>(9)?
+                    .parse()
+                    .unwrap_or(DeviceType::Linux),
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
             })
         })
         .map_err(|e| format!("服务器不存在: {}", e))?
     };
+
+    if server.device_type == DeviceType::Network {
+        return Err("网络设备通常不提供 SFTP 服务，请改用终端命令交互".to_string());
+    }
     
     // 创建 SSH 配置
     let config = client::Config {
@@ -132,8 +139,6 @@ pub async fn sftp_connect(
         .await
         .map_err(|e| format!("打开通道失败: {:?}", e))?;
     
-    // 连接到 SFTP
-    let manager = &state.manager;
     // 连接到 SFTP
     let manager = &state.manager;
     manager.connect(&session_id, channel, session).await?;

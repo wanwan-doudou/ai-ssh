@@ -8,6 +8,7 @@ mod services;
 mod db;
 mod ssh;
 mod sftp;
+mod provider_utils;
 
 use commands::ssh::SshState;
 use commands::sftp::SftpState;

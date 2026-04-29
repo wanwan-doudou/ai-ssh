@@ -1,14 +1,14 @@
 import { create } from 'zustand';
 
 // 终端输出缓冲区配置
-const MAX_BUFFER_SIZE = 8000; // 最大缓冲字符数
-const COMMAND_OUTPUT_TIMEOUT = 300; // 初始等待时间（毫秒）- 缩短以便更快开始轮询
+const MAX_BUFFER_SIZE = 60000; // 最大缓冲字符数
 const POLLING_INTERVAL = 300; // 轮询间隔（毫秒）- 更频繁检测
-const MAX_WAIT_TIME = 300000; // 最大等待时间 5 分钟
+const MAX_WAIT_TIME = 1800000; // 最大等待时间 30 分钟
 const IDLE_THRESHOLD = 3000; // 输出静止阈值（毫秒）- 快速命令的基础等待时间
 const LONG_IDLE_THRESHOLD = 3000; // 长命令静止阈值（毫秒）- 没检测到提示符时的后备等待时间
 const MIN_EXECUTION_TIME = 500; // 最小执行时间（毫秒）- 确保命令有足够执行时间
 const QUICK_COMPLETE_THRESHOLD = 500; // 快速完成阈值（毫秒）- 检测到提示符后等待这么久确认稳定
+const AI_COMMAND_MARKER_PREFIX = '__AI_SSH_CMD';
 
 // 常见的 Shell 提示符模式（用于检测命令完成）
 // 使用更严格的模式匹配，要求有明确的用户名@主机名结构
@@ -57,11 +57,24 @@ const INTERACTIVE_PROGRAM_PATTERNS = [
   { pattern: /Press.*continue|any key/i, exitKey: '\n' },       // 按任意键继续
 ];
 
+export interface PendingCommand {
+  command: string;
+  startTime: number;
+  markerId?: string;
+}
+
+export interface InstrumentedCommandOutput {
+  started: boolean;
+  completed: boolean;
+  exitCode?: number;
+  output: string;
+}
+
 interface TerminalOutputStore {
   // 每个会话的终端输出缓冲区
   outputBuffers: Map<string, string>;
   // 每个会话正在等待的命令
-  pendingCommands: Map<string, { command: string; startTime: number }>;
+  pendingCommands: Map<string, PendingCommand>;
   
   // 追加终端输出到缓冲区
   appendOutput: (sessionId: string, output: string) => void;
@@ -72,9 +85,9 @@ interface TerminalOutputStore {
   // 清空缓冲区
   clearOutput: (sessionId: string) => void;
   // 设置等待中的命令
-  setPendingCommand: (sessionId: string, command: string) => void;
+  setPendingCommand: (sessionId: string, command: string, markerId?: string) => void;
   // 获取等待中的命令
-  getPendingCommand: (sessionId: string) => { command: string; startTime: number } | undefined;
+  getPendingCommand: (sessionId: string) => PendingCommand | undefined;
   // 清除等待中的命令
   clearPendingCommand: (sessionId: string) => void;
 }
@@ -82,7 +95,7 @@ interface TerminalOutputStore {
 // 清理 ANSI 转义序列，使输出更干净
 function stripAnsiCodes(text: string): string {
   // 移除常见的 ANSI 转义序列
-  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+  return text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
              .replace(/\x1b\][^\x07]*\x07/g, '') // OSC sequences
              .replace(/\r/g, ''); // 移除回车符
 }
@@ -132,10 +145,10 @@ export const useTerminalOutputStore = create<TerminalOutputStore>()((set, get) =
     });
   },
   
-  setPendingCommand: (sessionId: string, command: string) => {
+  setPendingCommand: (sessionId: string, command: string, markerId?: string) => {
     set((state) => {
       const pending = new Map(state.pendingCommands);
-      pending.set(sessionId, { command, startTime: Date.now() });
+      pending.set(sessionId, { command, markerId, startTime: Date.now() });
       return { pendingCommands: pending };
     });
   },
@@ -229,9 +242,114 @@ export function detectInteractiveProgram(output: string): string | null {
   return null;
 }
 
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function createCommandMarkerId(): string {
+  const randomPart = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+  return randomPart.replace(/[^a-zA-Z0-9]/g, '').slice(0, 32);
+}
+
+export function getCommandMarkers(markerId: string) {
+  return {
+    start: `${AI_COMMAND_MARKER_PREFIX}_START_${markerId}__`,
+    end: `${AI_COMMAND_MARKER_PREFIX}_END_${markerId}__`,
+  };
+}
+
+export function buildInstrumentedCommand(command: string, markerId: string): string {
+  const markers = getCommandMarkers(markerId);
+  const normalizedCommand = command.replace(/\r\n/g, '\n').trimEnd();
+
+  return [
+    `printf '\\n%s\\n' ${shellSingleQuote(markers.start)}`,
+    normalizedCommand,
+    '__ai_ssh_exit=$?',
+    `printf '\\n%s:%s\\n' ${shellSingleQuote(markers.end)} "$__ai_ssh_exit"`,
+  ].join('\n');
+}
+
+export function parseInstrumentedCommandOutput(
+  output: string,
+  markerId: string,
+  command: string
+): InstrumentedCommandOutput {
+  const markers = getCommandMarkers(markerId);
+  const normalizedOutput = output.replace(/\r/g, '');
+  const lines = normalizedOutput.split('\n');
+  const endPattern = new RegExp(`^${escapeRegExp(markers.end)}:(\\d+)$`);
+
+  let startLineIndex = -1;
+  let endLineIndex = -1;
+  let exitCode: number | undefined;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+
+    if (trimmed === markers.start) {
+      startLineIndex = index;
+      continue;
+    }
+
+    const endMatch = trimmed.match(endPattern);
+    if (endMatch) {
+      endLineIndex = index;
+      exitCode = Number.parseInt(endMatch[1], 10);
+      break;
+    }
+  }
+
+  const bodyStart = startLineIndex >= 0 ? startLineIndex + 1 : 0;
+  const bodyEnd = endLineIndex >= 0 ? endLineIndex : lines.length;
+  let removedCommandEcho = false;
+  const commandText = command.trim();
+  const outputLines = lines
+    .slice(bodyStart, bodyEnd)
+    .filter((line) => !isInternalCommandControlLine(line, markerId))
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return true;
+      if (!removedCommandEcho && commandText && trimmed === commandText) {
+        removedCommandEcho = true;
+        return false;
+      }
+      if (!removedCommandEcho && commandText && trimmed.endsWith(commandText) && trimmed.length <= commandText.length + 200) {
+        removedCommandEcho = true;
+        return false;
+      }
+      return true;
+    });
+
+  return {
+    started: startLineIndex >= 0,
+    completed: endLineIndex >= 0,
+    exitCode,
+    output: outputLines.join('\n').trim(),
+  };
+}
+
+function isInternalCommandControlLine(line: string, markerId?: string): boolean {
+  if (line.includes(AI_COMMAND_MARKER_PREFIX)) return true;
+  if (markerId && line.includes(markerId)) return true;
+  return line.includes('__ai_ssh_exit=$?') || line.includes('__ai_ssh_exit=');
+}
+
+export function stripInternalCommandControlLines(text: string): string {
+  return text
+    .replace(/^.*__AI_SSH_CMD_(?:START|END)_[A-Za-z0-9]+__.*(?:\r?\n)?/gm, '')
+    .replace(/^.*__ai_ssh_exit=\$\?.*(?:\r?\n)?/gm, '');
+}
+
 // 导出常量供其他模块使用
 export { 
-  COMMAND_OUTPUT_TIMEOUT, 
   POLLING_INTERVAL, 
   MAX_WAIT_TIME, 
   IDLE_THRESHOLD,

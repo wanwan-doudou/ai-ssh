@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { X, Server, Key, Lock } from "lucide-react";
+import { X, Server, Key, Lock, Network } from "lucide-react";
 import type { Server as ServerType } from "@/types";
 import { useServerStore } from "@/stores/serverStore";
 
@@ -18,6 +18,7 @@ export function ServerForm({ server, onClose }: ServerFormProps) {
     port: 22,
     username: "root",
     authType: "password" as "password" | "privateKey",
+    deviceType: "linux" as "linux" | "network",
     password: "",
     privateKeyPath: "",
     group: "",
@@ -34,6 +35,7 @@ export function ServerForm({ server, onClose }: ServerFormProps) {
         port: server.port,
         username: server.username,
         authType: server.authType,
+        deviceType: server.deviceType || "linux",
         password: server.password || "",
         privateKeyPath: server.privateKeyPath || "",
         group: server.group || "",
@@ -80,6 +82,7 @@ export function ServerForm({ server, onClose }: ServerFormProps) {
       port: formData.port,
       username: formData.username,
       authType: formData.authType,
+      deviceType: formData.deviceType,
       password: formData.authType === "password" ? formData.password : undefined,
       privateKeyPath: formData.authType === "privateKey" ? formData.privateKeyPath : undefined,
       group: formData.group || undefined,
@@ -177,6 +180,39 @@ export function ServerForm({ server, onClose }: ServerFormProps) {
               className="input"
             />
             {errors.username && <p className="text-red-500 dark:text-red-400 text-xs mt-1">{errors.username}</p>}
+          </div>
+
+          {/* 设备类型 */}
+          <div>
+            <label className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
+              设备类型
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setFormData({ ...formData, deviceType: "linux" })}
+                className={`p-3 rounded-lg border transition-all flex items-center gap-2 ${
+                  formData.deviceType === "linux"
+                    ? "border-primary-500 bg-primary-50 text-primary-600 dark:bg-primary-500/10 dark:text-primary-400"
+                    : "border-surface-200 dark:border-surface-600 text-surface-500 dark:text-surface-400 hover:border-surface-300 dark:hover:border-surface-500"
+                }`}
+              >
+                <Server className="w-4 h-4" />
+                Linux
+              </button>
+              <button
+                type="button"
+                onClick={() => setFormData({ ...formData, deviceType: "network" })}
+                className={`p-3 rounded-lg border transition-all flex items-center gap-2 ${
+                  formData.deviceType === "network"
+                    ? "border-primary-500 bg-primary-50 text-primary-600 dark:bg-primary-500/10 dark:text-primary-400"
+                    : "border-surface-200 dark:border-surface-600 text-surface-500 dark:text-surface-400 hover:border-surface-300 dark:hover:border-surface-500"
+                }`}
+              >
+                <Network className="w-4 h-4" />
+                防火墙/交换机
+              </button>
+            </div>
           </div>
 
           {/* 认证方式 */}

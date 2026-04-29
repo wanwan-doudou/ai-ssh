@@ -2,7 +2,7 @@
 //!
 //! 提供 Tauri 命令接口，连接前端和 SSH 管理器
 
-use crate::models::Server;
+use crate::models::{AuthType, DeviceType, Server};
 use crate::ssh::SshManager;
 use crate::AppState;
 use rusqlite::params;
@@ -87,7 +87,7 @@ pub struct ServerFilesystemInfo {
     pub mount_point: String,
 }
 
-const SERVER_INFO_COMMAND: &str = r#"sh -lc '
+const SERVER_INFO_COMMAND_LINUX: &str = r#"sh -lc '
 HOST=$(hostname 2>/dev/null || uname -n 2>/dev/null || echo unknown)
 OS=$( ( [ -r /etc/os-release ] && . /etc/os-release && echo "$PRETTY_NAME" ) || uname -sr 2>/dev/null || echo unknown )
 KERNEL_NAME=$(uname -s 2>/dev/null || echo unknown)
@@ -197,9 +197,190 @@ printf "HOST=%s\nOS=%s\nKERNEL=%s\nKERNEL_NAME=%s\nKERNEL_VERSION=%s\nARCH=%s\nU
   "$HOST" "$OS" "$KERNEL" "$KERNEL_NAME" "$KERNEL_VERSION" "$ARCH" "$UPTIME" "$CPU_MODEL" "$CPU_CORES" "$LOAD_AVG" "$MEM_TOTAL_KB" "$MEM_USED_KB" "$MEM_AVAIL_KB" "$SWAP_TOTAL_KB" "$SWAP_USED_KB" "$CPU_USER_PCT" "$CPU_NICE_PCT" "$CPU_SYSTEM_PCT" "$CPU_IDLE_PCT" "$CPU_IOWAIT_PCT" "$CPU_IRQ_PCT" "$CPU_SOFTIRQ_PCT" "$CPU_STEAL_PCT" "$DISK_TOTAL_KB" "$DISK_USED_KB" "$DISK_USE_PCT" "$IP_ADDR" "$NET_RX_BYTES" "$NET_TX_BYTES"
 '"#;
 
+const SERVER_INFO_COMMAND_LINUX_MINIMAL: &str = r#"sh -lc '
+HOST=$(hostname 2>/dev/null || uname -n 2>/dev/null || echo unknown)
+OS=$(uname -sr 2>/dev/null || echo unknown)
+KERNEL_NAME=$(uname -s 2>/dev/null || echo unknown)
+KERNEL_VERSION=$(uname -r 2>/dev/null || echo unknown)
+ARCH=$(uname -m 2>/dev/null || echo unknown)
+KERNEL=$(uname -a 2>/dev/null || echo unknown)
+UPTIME=$(uptime 2>/dev/null | sed -n "s/.*up \([^,]*\).*/\1/p")
+if [ -z "$UPTIME" ]; then UPTIME=unknown; fi
+CPU_MODEL=$(uname -p 2>/dev/null || echo unknown)
+IP_ADDR=$(hostname -I 2>/dev/null | awk "{print \$1}")
+if [ -z "$IP_ADDR" ]; then IP_ADDR=$(ip route get 1 2>/dev/null | awk "{for(i=1;i<=NF;i++) if(\$i==\"src\"){print \$(i+1); exit}}"); fi
+if [ -z "$IP_ADDR" ]; then IP_ADDR=unknown; fi
+printf "HOST=%s\nOS=%s\nKERNEL=%s\nKERNEL_NAME=%s\nKERNEL_VERSION=%s\nARCH=%s\nUPTIME=%s\nCPU_MODEL=%s\nCPU_CORES=0\nLOAD_AVG=unknown\nMEM_TOTAL_KB=0\nMEM_USED_KB=0\nMEM_AVAIL_KB=0\nSWAP_TOTAL_KB=0\nSWAP_USED_KB=0\nCPU_USER_PCT=0.0\nCPU_NICE_PCT=0.0\nCPU_SYSTEM_PCT=0.0\nCPU_IDLE_PCT=0.0\nCPU_IOWAIT_PCT=0.0\nCPU_IRQ_PCT=0.0\nCPU_SOFTIRQ_PCT=0.0\nCPU_STEAL_PCT=0.0\nDISK_TOTAL_KB=0\nDISK_USED_KB=0\nDISK_USE_PCT=0\nIP_ADDR=%s\nNET_RX_BYTES=0\nNET_TX_BYTES=0\n" \
+  "$HOST" "$OS" "$KERNEL" "$KERNEL_NAME" "$KERNEL_VERSION" "$ARCH" "$UPTIME" "$CPU_MODEL" "$IP_ADDR"
+'"#;
+
+const NETWORK_RUNTIME_INFO_CANDIDATE_COMMANDS: [&str; 6] = [
+    "show version",
+    "display version",
+    "get system status",
+    "show system information",
+    "show system info",
+    "show inventory",
+];
+
 fn clamp_limit(limit: Option<u32>, default_value: usize, max_value: usize) -> usize {
     let value = limit.unwrap_or(default_value as u32) as usize;
     value.clamp(1, max_value)
+}
+
+fn empty_runtime_info(host: String, os: String) -> ServerRuntimeInfo {
+    ServerRuntimeInfo {
+        host,
+        os,
+        kernel: "unknown".to_string(),
+        kernel_name: "unknown".to_string(),
+        kernel_version: "unknown".to_string(),
+        architecture: "unknown".to_string(),
+        uptime: "unknown".to_string(),
+        cpu_model: "unknown".to_string(),
+        cpu_cores: 0,
+        load_avg: "unknown".to_string(),
+        memory_total_kb: 0,
+        memory_used_kb: 0,
+        memory_available_kb: 0,
+        swap_total_kb: 0,
+        swap_used_kb: 0,
+        cpu_user_percent: 0.0,
+        cpu_nice_percent: 0.0,
+        cpu_system_percent: 0.0,
+        cpu_idle_percent: 0.0,
+        cpu_iowait_percent: 0.0,
+        cpu_irq_percent: 0.0,
+        cpu_softirq_percent: 0.0,
+        cpu_steal_percent: 0.0,
+        disk_total_kb: 0,
+        disk_used_kb: 0,
+        disk_use_percent: 0.0,
+        ip_address: "unknown".to_string(),
+        net_rx_bytes: 0,
+        net_tx_bytes: 0,
+        collected_at: chrono::Utc::now().timestamp_millis(),
+    }
+}
+
+fn looks_like_structured_runtime_output(output: &str) -> bool {
+    output.contains("HOST=") && output.contains("OS=")
+}
+
+fn first_non_empty_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("--More--"))
+        .map(ToString::to_string)
+}
+
+fn extract_line_value(line: &str) -> Option<String> {
+    if let Some((_, value)) = line.split_once(':') {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+
+    if let Some((_, value)) = line.split_once('=') {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+
+    if let Some((_, value)) = line.split_once(" is ") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+
+    None
+}
+
+fn find_value_by_keywords(output: &str, keywords: &[&str]) -> Option<String> {
+    output.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("show ") || lower.starts_with("display ") || lower.starts_with("get ")
+        {
+            return None;
+        }
+
+        if keywords.iter().any(|keyword| lower.contains(keyword)) {
+            return extract_line_value(trimmed).or_else(|| Some(trimmed.to_string()));
+        }
+
+        None
+    })
+}
+
+fn parse_network_runtime_info(output: &str) -> ServerRuntimeInfo {
+    let mut info = empty_runtime_info("unknown".to_string(), "网络设备".to_string());
+
+    if output.trim().is_empty() {
+        return info;
+    }
+
+    if let Some(host) = find_value_by_keywords(
+        output,
+        &["hostname", "host name", "device name", "sysname", "system name"],
+    ) {
+        info.host = host;
+    }
+
+    if let Some(uptime) = find_value_by_keywords(output, &["uptime", "up time", "运行时间"]) {
+        info.uptime = uptime;
+    }
+
+    if let Some(os_line) = find_value_by_keywords(
+        output,
+        &[
+            "software",
+            "version",
+            "ios",
+            "nx-os",
+            "fortios",
+            "junos",
+            "huawei",
+        ],
+    ) {
+        info.os = os_line;
+    } else if let Some(first_line) = first_non_empty_line(output) {
+        info.os = first_line;
+    }
+
+    info.kernel_name = "network-os".to_string();
+    info.kernel = info.os.clone();
+    info
+}
+
+async fn execute_first_non_empty_command(
+    manager: &SshManager,
+    session_id: &str,
+    commands: &[&str],
+) -> Result<String, String> {
+    let mut last_error: Option<String> = None;
+
+    for command in commands {
+        match manager.execute_command(session_id, command).await {
+            Ok(output) if !output.trim().is_empty() => return Ok(output),
+            Ok(_) => {
+                last_error = Some(format!("命令无输出: {}", command));
+            }
+            Err(err) => {
+                last_error = Some(err);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "没有可用的命令".to_string()))
 }
 
 fn parse_key_value_fields(line: &str) -> HashMap<String, String> {
@@ -214,19 +395,19 @@ fn parse_key_value_fields(line: &str) -> HashMap<String, String> {
 
 fn build_process_list_command(limit: usize) -> String {
     format!(
-        r#"sh -lc 'set -f; ps -eo pid=,user=,rss=,pcpu=,comm=,args= --sort=-pcpu 2>/dev/null | head -n {limit} | while IFS= read -r line; do set -- $line; [ $# -lt 5 ] && continue; pid=$1; user=$2; rss=$3; cpu=$4; name=$5; shift 5; cmd="$*"; printf "PID=%s\tUSER=%s\tRSS_KB=%s\tCPU=%s\tNAME=%s\tCMD=%s\n" "$pid" "$user" "$rss" "$cpu" "$name" "$cmd"; done'"#
+        r#"sh -lc 'set -f; if ps -eo pid=,user=,rss=,pcpu=,comm=,args= --sort=-pcpu >/dev/null 2>&1; then ps -eo pid=,user=,rss=,pcpu=,comm=,args= --sort=-pcpu 2>/dev/null | head -n {limit} | while IFS= read -r line; do set -- $line; [ $# -lt 5 ] && continue; pid=$1; user=$2; rss=$3; cpu=$4; name=$5; shift 5; cmd="$*"; printf "PID=%s\tUSER=%s\tRSS_KB=%s\tCPU=%s\tNAME=%s\tCMD=%s\n" "$pid" "$user" "$rss" "$cpu" "$name" "$cmd"; done; elif ps >/dev/null 2>&1; then ps 2>/dev/null | tail -n +2 | head -n {limit} | while IFS= read -r line; do set -- $line; [ $# -lt 1 ] && continue; pid=$1; user=${{2:-unknown}}; name=${{5:-unknown}}; printf "PID=%s\tUSER=%s\tRSS_KB=0\tCPU=0\tNAME=%s\tCMD=%s\n" "$pid" "$user" "$name" "$line"; done; fi'"#
     )
 }
 
 fn build_network_connection_command(limit: usize) -> String {
     format!(
-        r#"sh -lc 'set -f; command -v ss >/dev/null 2>&1 || exit 0; ss -tunapH 2>/dev/null | head -n {limit} | while IFS= read -r line; do set -- $line; [ $# -lt 6 ] && continue; proto=$1; state=$2; recvq=$3; sendq=$4; local=$5; peer=$6; shift 6; proc="$*"; printf "PROTO=%s\tSTATE=%s\tRECV_Q=%s\tSEND_Q=%s\tLOCAL=%s\tPEER=%s\tPROC=%s\n" "$proto" "$state" "$recvq" "$sendq" "$local" "$peer" "$proc"; done'"#
+        r#"sh -lc 'set -f; if command -v ss >/dev/null 2>&1; then ss -tunapH 2>/dev/null | head -n {limit} | while IFS= read -r line; do set -- $line; [ $# -lt 6 ] && continue; proto=$1; state=$2; recvq=$3; sendq=$4; local=$5; peer=$6; shift 6; proc="$*"; printf "PROTO=%s\tSTATE=%s\tRECV_Q=%s\tSEND_Q=%s\tLOCAL=%s\tPEER=%s\tPROC=%s\n" "$proto" "$state" "$recvq" "$sendq" "$local" "$peer" "$proc"; done; elif command -v netstat >/dev/null 2>&1; then netstat -tunap 2>/dev/null | tail -n +3 | head -n {limit} | while IFS= read -r line; do set -- $line; [ $# -lt 5 ] && continue; proto=$1; recvq=$2; sendq=$3; local=$4; peer=$5; state=UNKNOWN; proc="-"; if [ "$proto" = "tcp" ] || [ "$proto" = "tcp6" ]; then state=${{6:-UNKNOWN}}; shift 6; proc="$*"; else shift 5; proc="$*"; fi; [ -z "$proc" ] && proc="-"; printf "PROTO=%s\tSTATE=%s\tRECV_Q=%s\tSEND_Q=%s\tLOCAL=%s\tPEER=%s\tPROC=%s\n" "$proto" "$state" "$recvq" "$sendq" "$local" "$peer" "$proc"; done; fi'"#
     )
 }
 
 fn build_filesystem_list_command(limit: usize) -> String {
     format!(
-        r#"sh -lc 'df -kPT 2>/dev/null | tail -n +2 | head -n {limit} | while IFS= read -r line; do set -- $line; [ $# -lt 7 ] && continue; fs=$1; fstype=$2; size=$3; used=$4; avail=$5; usep=$6; mount=$7; pct=$(printf "%s" "$usep" | tr -d "%"); printf "FS=%s\tTYPE=%s\tSIZE_KB=%s\tUSED_KB=%s\tAVAIL_KB=%s\tUSE_PCT=%s\tMOUNT=%s\n" "$fs" "$fstype" "$size" "$used" "$avail" "$pct" "$mount"; done'"#
+        r#"sh -lc 'if df -kPT >/dev/null 2>&1; then df -kPT 2>/dev/null | tail -n +2 | head -n {limit} | while IFS= read -r line; do set -- $line; [ $# -lt 7 ] && continue; fs=$1; fstype=$2; size=$3; used=$4; avail=$5; usep=$6; mount=$7; pct=$(printf "%s" "$usep" | tr -d "%"); printf "FS=%s\tTYPE=%s\tSIZE_KB=%s\tUSED_KB=%s\tAVAIL_KB=%s\tUSE_PCT=%s\tMOUNT=%s\n" "$fs" "$fstype" "$size" "$used" "$avail" "$pct" "$mount"; done; else df -kP 2>/dev/null | tail -n +2 | head -n {limit} | while IFS= read -r line; do set -- $line; [ $# -lt 6 ] && continue; fs=$1; size=$2; used=$3; avail=$4; usep=$5; mount=$6; pct=$(printf "%s" "$usep" | tr -d "%"); printf "FS=%s\tTYPE=unknown\tSIZE_KB=%s\tUSED_KB=%s\tAVAIL_KB=%s\tUSE_PCT=%s\tMOUNT=%s\n" "$fs" "$size" "$used" "$avail" "$pct" "$mount"; done; fi'"#
     )
 }
 
@@ -406,12 +587,11 @@ pub async fn connect_ssh(
         let conn = app_state.db.lock().map_err(|e| e.to_string())?;
         
         let mut stmt = conn
-            .prepare("SELECT id, name, host, port, username, auth_type, password, private_key_path, group_name, created_at, updated_at FROM servers WHERE id = ?1")
+            .prepare("SELECT id, name, host, port, username, auth_type, password, private_key_path, group_name, device_type, created_at, updated_at FROM servers WHERE id = ?1")
             .map_err(|e| e.to_string())?;
         
         let server = stmt
             .query_row(params![server_id], |row| {
-                use crate::models::AuthType;
                 Ok(Server {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -422,8 +602,12 @@ pub async fn connect_ssh(
                     password: row.get(6)?,
                     private_key_path: row.get(7)?,
                     group: row.get(8)?,
-                    created_at: row.get(9)?,
-                    updated_at: row.get(10)?,
+                    device_type: row
+                        .get::<_, String>(9)?
+                        .parse()
+                        .unwrap_or(DeviceType::Linux),
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
                 })
             })
             .map_err(|e| format!("服务器不存在: {}", e))?;
@@ -491,8 +675,36 @@ pub async fn get_server_runtime_info(
     ssh_state: State<'_, SshState>,
 ) -> Result<ServerRuntimeInfo, String> {
     let manager = ssh_state.manager.lock().await;
-    let output = manager.execute_command(&session_id, SERVER_INFO_COMMAND).await?;
-    Ok(parse_runtime_info(&output))
+    let device_type = manager
+        .session_device_type(&session_id)
+        .await
+        .unwrap_or(DeviceType::Linux);
+
+    if device_type == DeviceType::Network {
+        match execute_first_non_empty_command(
+            &manager,
+            &session_id,
+            &NETWORK_RUNTIME_INFO_CANDIDATE_COMMANDS,
+        )
+        .await
+        {
+            Ok(output) => return Ok(parse_network_runtime_info(&output)),
+            Err(_) => return Ok(empty_runtime_info("unknown".to_string(), "网络设备".to_string())),
+        }
+    }
+
+    let output = execute_first_non_empty_command(
+        &manager,
+        &session_id,
+        &[SERVER_INFO_COMMAND_LINUX, SERVER_INFO_COMMAND_LINUX_MINIMAL],
+    )
+    .await?;
+
+    if looks_like_structured_runtime_output(&output) {
+        Ok(parse_runtime_info(&output))
+    } else {
+        Ok(parse_network_runtime_info(&output))
+    }
 }
 
 /// 获取进程列表（按 CPU 使用率降序）
@@ -503,9 +715,19 @@ pub async fn get_server_process_list(
     ssh_state: State<'_, SshState>,
 ) -> Result<Vec<ServerProcessInfo>, String> {
     let manager = ssh_state.manager.lock().await;
+    let device_type = manager
+        .session_device_type(&session_id)
+        .await
+        .unwrap_or(DeviceType::Linux);
+    if device_type == DeviceType::Network {
+        return Ok(Vec::new());
+    }
+
     let command = build_process_list_command(clamp_limit(limit, 60, 300));
-    let output = manager.execute_command(&session_id, &command).await?;
-    Ok(parse_process_list(&output))
+    match manager.execute_command(&session_id, &command).await {
+        Ok(output) => Ok(parse_process_list(&output)),
+        Err(_) => Ok(Vec::new()),
+    }
 }
 
 /// 获取网络连接列表
@@ -516,9 +738,19 @@ pub async fn get_server_network_connections(
     ssh_state: State<'_, SshState>,
 ) -> Result<Vec<ServerNetworkConnection>, String> {
     let manager = ssh_state.manager.lock().await;
+    let device_type = manager
+        .session_device_type(&session_id)
+        .await
+        .unwrap_or(DeviceType::Linux);
+    if device_type == DeviceType::Network {
+        return Ok(Vec::new());
+    }
+
     let command = build_network_connection_command(clamp_limit(limit, 120, 500));
-    let output = manager.execute_command(&session_id, &command).await?;
-    Ok(parse_network_connections(&output))
+    match manager.execute_command(&session_id, &command).await {
+        Ok(output) => Ok(parse_network_connections(&output)),
+        Err(_) => Ok(Vec::new()),
+    }
 }
 
 /// 获取文件系统使用情况
@@ -529,7 +761,17 @@ pub async fn get_server_filesystems(
     ssh_state: State<'_, SshState>,
 ) -> Result<Vec<ServerFilesystemInfo>, String> {
     let manager = ssh_state.manager.lock().await;
+    let device_type = manager
+        .session_device_type(&session_id)
+        .await
+        .unwrap_or(DeviceType::Linux);
+    if device_type == DeviceType::Network {
+        return Ok(Vec::new());
+    }
+
     let command = build_filesystem_list_command(clamp_limit(limit, 80, 300));
-    let output = manager.execute_command(&session_id, &command).await?;
-    Ok(parse_filesystems(&output))
+    match manager.execute_command(&session_id, &command).await {
+        Ok(output) => Ok(parse_filesystems(&output)),
+        Err(_) => Ok(Vec::new()),
+    }
 }

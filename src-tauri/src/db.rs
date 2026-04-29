@@ -19,11 +19,34 @@ pub fn init_database(path: &Path) -> Result<Connection> {
             password TEXT,
             private_key_path TEXT,
             group_name TEXT,
+            device_type TEXT NOT NULL DEFAULT 'linux',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         )",
         [],
     )?;
+
+    // 兼容旧版本数据库：补充 device_type 字段
+    let has_device_type = {
+        let mut stmt = conn.prepare("PRAGMA table_info(servers)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let column_name: String = row.get(1)?;
+            if column_name == "device_type" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+
+    if !has_device_type {
+        conn.execute(
+            "ALTER TABLE servers ADD COLUMN device_type TEXT NOT NULL DEFAULT 'linux'",
+            [],
+        )?;
+    }
     
     // 创建 providers 表
     conn.execute(

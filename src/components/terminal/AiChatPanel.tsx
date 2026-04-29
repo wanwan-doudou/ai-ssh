@@ -6,11 +6,13 @@ import { useChatStore } from '@/stores/chatStore';
 import { useProviderStore } from '@/stores/providerStore';
 import { 
   useTerminalOutputStore, 
-  COMMAND_OUTPUT_TIMEOUT,
-  isCommandEchoed,
-  detectNewPromptLine,
-  QUICK_COMPLETE_THRESHOLD,
-  LONG_IDLE_THRESHOLD 
+  POLLING_INTERVAL,
+  MAX_WAIT_TIME,
+  MIN_EXECUTION_TIME,
+  buildInstrumentedCommand,
+  createCommandMarkerId,
+  detectInteractiveProgram,
+  parseInstrumentedCommandOutput,
 } from '@/stores/terminalOutputStore';
 import type { ChatMessage } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
@@ -28,17 +30,25 @@ interface StreamEvent {
 interface AiChatPanelProps {
   sessionId: string;
   // 执行命令到终端的回调
-  onExecuteCommand: (command: string) => void;
+  onExecuteCommand: (command: string, options?: { appendNewline?: boolean }) => void;
 }
 
 const MAX_INPUT_LINES = 5;
+const TERMINAL_CONTEXT_TAIL_LENGTH = 3000;
 
 export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
   const [input, setInput] = useState('');
+  const [elapsedTick, setElapsedTick] = useState(Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // 用于中断当前 AI 请求的事件监听器引用
   const unlistenRef = useRef<UnlistenFn | null>(null);
+  const activeCommandRef = useRef<{
+    markerId: string;
+    command: string;
+    messageId?: string;
+    cancelled: boolean;
+  } | null>(null);
   
   const { 
     getMessages, 
@@ -63,6 +73,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     getOutput, 
     clearOutput, 
     setPendingCommand, 
+    getPendingCommand,
     clearPendingCommand 
   } = useTerminalOutputStore();
   
@@ -73,6 +84,17 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
   const isWaitingForOutput = useChatStore((state) => 
     state.sessions.get(sessionId)?.waitingForOutput || false
   );
+  const pendingCommand = useTerminalOutputStore((state) =>
+    state.pendingCommands.get(sessionId)
+  );
+
+  useEffect(() => {
+    if (!isWaitingForOutput) return;
+
+    setElapsedTick(Date.now());
+    const timer = window.setInterval(() => setElapsedTick(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [isWaitingForOutput]);
 
   const resizeInputTextarea = (textarea?: HTMLTextAreaElement | null) => {
     const el = textarea ?? inputRef.current;
@@ -104,6 +126,48 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
 
     provider = useProviderStore.getState().getActiveProvider();
     return provider;
+  };
+
+  const formatElapsed = (ms: number) => {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    if (minutes <= 0) return `${seconds}s`;
+    return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+  };
+
+  const shouldAttachTerminalContext = (userMessage: string) => {
+    return /结果|输出|报错|错误|失败|没反应|没有反应|卡住|卡了|运行|执行|命令|进度|日志|terminal|shell|command|output|error/i.test(userMessage);
+  };
+
+  const buildMessageWithTerminalContext = (userMessage: string) => {
+    const pending = getPendingCommand(sessionId);
+    const outputTail = getOutput(sessionId).slice(-TERMINAL_CONTEXT_TAIL_LENGTH).trim();
+
+    if (!pending && (!outputTail || !shouldAttachTerminalContext(userMessage))) {
+      return userMessage;
+    }
+
+    const contextLines = ['[终端上下文]'];
+
+    if (pending) {
+      const elapsed = formatElapsed(Date.now() - pending.startTime);
+      contextLines.push(
+        `当前命令仍在执行，尚未看到完成标记。命令：${pending.command}`,
+        `已运行：${elapsed}`,
+        '如果用户询问结果或进度，请明确说明命令还没有结束，不要把暂无输出判断为执行完成。'
+      );
+    } else {
+      contextLines.push(
+        '下面是最近终端输出。若最后只有命令回显、没有新的 shell 提示符，可能表示命令仍在运行。'
+      );
+    }
+
+    if (outputTail) {
+      contextLines.push(`最近终端输出：\n\`\`\`\n${outputTail}\n\`\`\``);
+    }
+
+    return `${contextLines.join('\n')}\n\n用户问题：${userMessage}`;
   };
 
   // 自动滚动到底部
@@ -193,7 +257,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
           
           // 自动模式下执行命令
           if (data.command && operationMode === 'auto') {
-            executeCommandAndWaitForOutput(data.command);
+            executeCommandAndWaitForOutput(data.command, assistantMessageId);
           }
         }
       });
@@ -204,7 +268,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
       // 调用流式 API
       await invoke('ai_chat_stream', {
         providerId: activeProvider.id,
-        message: trimmedInput,
+        message: buildMessageWithTerminalContext(trimmedInput),
         sessionId,
         history,
       });
@@ -226,16 +290,16 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
   };
 
   // 执行命令并持续监听输出，直到命令完成
-  const executeCommandAndWaitForOutput = async (command: string) => {
-    // 导入持续监听相关的配置
-    const { 
-      detectCommandComplete, 
-      detectInteractiveProgram,
-      POLLING_INTERVAL, 
-      MAX_WAIT_TIME, 
-      MIN_EXECUTION_TIME 
-    } = await import('@/stores/terminalOutputStore');
-    
+  const executeCommandAndWaitForOutput = async (command: string, messageId?: string) => {
+    const markerId = createCommandMarkerId();
+    const commandRun = {
+      markerId,
+      command,
+      messageId,
+      cancelled: false,
+    };
+    activeCommandRef.current = commandRun;
+
     // 检测是否处于交互式程序中（如 less, more, vim 等）
     const currentOutput = getOutput(sessionId);
     const exitKey = detectInteractiveProgram(currentOutput);
@@ -243,7 +307,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     if (exitKey) {
       console.log('[AI] 检测到交互式程序，发送退出按键:', JSON.stringify(exitKey));
       // 先发送退出按键
-      onExecuteCommand(exitKey);
+      onExecuteCommand(exitKey, { appendNewline: false });
       // 等待程序退出
       await new Promise(resolve => setTimeout(resolve, 500));
     }
@@ -252,122 +316,96 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     clearOutput(sessionId);
     
     // 记录等待的命令
-    setPendingCommand(sessionId, command);
+    setPendingCommand(sessionId, command, markerId);
     
     console.log('[AI] 执行命令:', command);
     
-    // 执行命令
-    onExecuteCommand(command);
+    // 执行带完成标记的命令，避免用输出静止时间误判长命令已结束
+    onExecuteCommand(buildInstrumentedCommand(command, markerId));
     
     // 立即设置等待输出状态，给用户即时反馈
     setWaitingForOutput(sessionId, true);
     
     // 更新命令状态
-    const updatedMessages = getMessages(sessionId);
-    const lastMessage = updatedMessages[updatedMessages.length - 1];
-    if (lastMessage) {
-      updateMessage(sessionId, lastMessage.id, { commandStatus: 'executed' });
+    const targetMessageId = messageId || getMessages(sessionId).slice(-1)[0]?.id;
+    if (targetMessageId) {
+      updateMessage(sessionId, targetMessageId, { commandStatus: 'running' });
     }
     
-    // 持续监听输出，直到命令完成
     const startTime = Date.now();
-    let lastOutputLength = 0;
-    let lastOutputTime = Date.now();
     let output = '';
-    let echoDetected = false;
-    let echoTime = 0;
-    
-    // 首先等待初始输出
-    await new Promise(resolve => setTimeout(resolve, COMMAND_OUTPUT_TIMEOUT));
-    
-    // 轮询检查命令是否完成
-    while (Date.now() - startTime < MAX_WAIT_TIME) {
-      output = getOutput(sessionId);
-      const currentLength = output.length;
-      
-      // 检测是否有新输出
-      if (currentLength > lastOutputLength) {
-        lastOutputLength = currentLength;
-        lastOutputTime = Date.now();
-      }
-      
-      // 步骤 1: 先等待命令回显（确认命令已发送到服务器）
-      if (!echoDetected) {
-        if (isCommandEchoed(output, command)) {
-          echoDetected = true;
-          echoTime = Date.now();
-          console.log('[AI] 检测到命令回显，开始等待执行完成');
-        } else {
-          // 命令回显超时检测（5秒）
-          if (Date.now() - startTime > 5000) {
-            console.log('[AI] 命令回显超时，但继续等待输出');
-            echoDetected = true;
-            echoTime = Date.now();
-          }
-          await new Promise(resolve => setTimeout(resolve, POLLING_INTERVAL));
-          continue;
+    let parsed = parseInstrumentedCommandOutput('', markerId, command);
+    let timedOut = false;
+
+    await new Promise(resolve => setTimeout(resolve, MIN_EXECUTION_TIME));
+
+    try {
+      while (Date.now() - startTime < MAX_WAIT_TIME) {
+        if (commandRun.cancelled) {
+          console.log('[AI] 命令等待被取消:', command);
+          return;
         }
-      }
-      
-      // 步骤 2: 确保至少经过 MIN_EXECUTION_TIME
-      const elapsedSinceEcho = Date.now() - echoTime;
-      if (elapsedSinceEcho < MIN_EXECUTION_TIME) {
+
+        output = getOutput(sessionId);
+        parsed = parseInstrumentedCommandOutput(output, markerId, command);
+
+        if (parsed.completed) {
+          console.log('[AI] 检测到命令完成标记:', {
+            command,
+            exitCode: parsed.exitCode,
+            outputLength: parsed.output.length,
+            totalTime: Date.now() - startTime,
+          });
+          break;
+        }
+
         await new Promise(resolve => setTimeout(resolve, POLLING_INTERVAL));
-        continue;
       }
-      
-      // 步骤 3: 检查命令是否完成 - 区分快速命令和长命令
-      const timeSinceLastOutput = Date.now() - lastOutputTime;
-      const hasNewPrompt = detectNewPromptLine(output);
-      const hasTraditionalPrompt = detectCommandComplete(output);
-      const hasPrompt = hasNewPrompt || hasTraditionalPrompt;
-      
-      // 策略1: 快速命令 - 检测到提示符且短暂静止即可完成
-      if (hasPrompt && timeSinceLastOutput > QUICK_COMPLETE_THRESHOLD && currentLength > 0) {
-        console.log('[AI] 快速命令完成检测:', { 
-          hasNewPrompt, 
-          hasTraditionalPrompt,
-          outputLength: currentLength,
-          idleTime: timeSinceLastOutput,
-          totalTime: Date.now() - startTime
-        });
-        break;
+
+      if (!parsed.completed) {
+        timedOut = true;
       }
-      
-      // 策略2: 长命令 - 输出长时间静止但没有检测到提示符
-      if (!hasPrompt && timeSinceLastOutput > LONG_IDLE_THRESHOLD && currentLength > 0) {
-        const lines = output.split('\n').filter(l => l.trim());
-        const lastLine = lines[lines.length - 1] || '';
-        console.log('[AI] 长命令静止完成 (提示符未检测到):', {
-          outputLength: currentLength,
-          idleTime: timeSinceLastOutput,
-          lastLine: lastLine.substring(0, 100)
-        });
-        break;
+    } finally {
+      if (activeCommandRef.current === commandRun) {
+        activeCommandRef.current = null;
       }
-      
-      // 等待一段时间后继续检查
-      await new Promise(resolve => setTimeout(resolve, POLLING_INTERVAL));
+      clearPendingCommand(sessionId);
+      setWaitingForOutput(sessionId, false);
     }
-    
-    // 获取最终输出
-    output = getOutput(sessionId);
-    clearPendingCommand(sessionId);
-    
-    // 关闭等待输出状态
-    setWaitingForOutput(sessionId, false);
-    
-    console.log('[AI] 命令执行完成，输出长度:', output.length, '耗时:', Date.now() - startTime, 'ms');
-    
-    // 如果有输出，发送给 AI 分析
-    if (output && output.trim().length > 50) {
-      await sendOutputToAI(command, output);
+
+    if (commandRun.cancelled) {
+      if (targetMessageId) {
+        updateMessage(sessionId, targetMessageId, { commandStatus: 'cancelled' });
+      }
+      return;
+    }
+
+    if (timedOut) {
+      if (targetMessageId) {
+        updateMessage(sessionId, targetMessageId, { commandStatus: 'timeout' });
+      }
+      addMessage(sessionId, {
+        role: 'system',
+        content: `命令仍未结束，已停止自动等待：${command}`,
+      });
+      return;
+    }
+
+    const commandStatus = parsed.exitCode === 0 ? 'completed' : 'failed';
+    if (targetMessageId) {
+      updateMessage(sessionId, targetMessageId, { commandStatus });
+    }
+
+    console.log('[AI] 命令执行完成，输出长度:', parsed.output.length, '耗时:', Date.now() - startTime, 'ms');
+
+    if (parsed.output.trim() || parsed.exitCode !== 0) {
+      await sendOutputToAI(command, parsed.output, parsed.exitCode);
     }
   };
 
   
   // 发送命令输出给 AI 分析（流式）
-  const sendOutputToAI = async (command: string, output: string) => {
+  const sendOutputToAI = async (command: string, output: string, exitCode?: number) => {
     const activeProvider = await ensureActiveProvider();
     if (!activeProvider) return;
 
@@ -375,7 +413,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
 
     // 截取输出，避免过长
     const truncatedOutput = output.length > 4000 
-      ? output.slice(-4000) + '\n... (输出过长已截断)' 
+      ? '... (前面输出过长已截断)\n' + output.slice(-4000)
       : output;
 
     // 先添加空消息
@@ -425,7 +463,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
 
           // 自动执行新命令
           if (data.command && operationMode === 'auto') {
-            executeCommandAndWaitForOutput(data.command);
+            executeCommandAndWaitForOutput(data.command, assistantMessageId);
           }
         }
       });
@@ -433,7 +471,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
       // 调用流式 API
       await invoke('ai_chat_stream', {
         providerId: activeProvider.id,
-        message: `命令 "${command}" 的执行结果如下，请分析并告诉我关键信息：\n\n\`\`\`\n${truncatedOutput}\n\`\`\``,
+        message: `命令 "${command}" 已完成，退出码：${exitCode ?? '未知'}。执行结果如下，请分析并告诉我关键信息：\n\n\`\`\`\n${truncatedOutput || '(命令无输出)'}\n\`\`\``,
         sessionId,
         history,
       });
@@ -453,7 +491,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
   // 处理命令执行（确认模式）
   const handleExecuteCommand = async (message: ChatMessage) => {
     if (!message.command) return;
-    await executeCommandAndWaitForOutput(message.command);
+    await executeCommandAndWaitForOutput(message.command, message.id);
   };
 
   // 拒绝命令
@@ -471,6 +509,15 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
 
   // 停止当前对话（中断 AI 请求）
   const stopCurrentChat = () => {
+    if (activeCommandRef.current) {
+      activeCommandRef.current.cancelled = true;
+      if (activeCommandRef.current.messageId) {
+        updateMessage(sessionId, activeCommandRef.current.messageId, { commandStatus: 'cancelled' });
+      }
+      onExecuteCommand('\x03', { appendNewline: false });
+      activeCommandRef.current = null;
+    }
+
     // 取消事件监听
     if (unlistenRef.current) {
       unlistenRef.current();
@@ -579,7 +626,11 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
         {isWaitingForOutput && (
           <div className="flex items-center gap-2 text-amber-600 dark:text-amber-400">
             <Loader2 className="w-4 h-4 animate-spin" />
-            <span className="text-sm">⏳ 正在等待命令执行完成...</span>
+            <span className="text-sm">
+              {pendingCommand
+                ? `正在执行：${pendingCommand.command} · ${formatElapsed(elapsedTick - pendingCommand.startTime)}`
+                : '正在等待命令执行完成...'}
+            </span>
           </div>
         )}
         
@@ -728,6 +779,21 @@ function MessageBubble({ message, operationMode, onExecute, onReject }: MessageB
               {/* 命令状态 */}
               {message.commandStatus === 'executed' && (
                 <span className="text-xs text-green-600 dark:text-green-400 flex-shrink-0">✓ 已执行</span>
+              )}
+              {message.commandStatus === 'running' && (
+                <span className="text-xs text-amber-600 dark:text-amber-400 flex-shrink-0">执行中</span>
+              )}
+              {message.commandStatus === 'completed' && (
+                <span className="text-xs text-green-600 dark:text-green-400 flex-shrink-0">已完成</span>
+              )}
+              {message.commandStatus === 'failed' && (
+                <span className="text-xs text-red-600 dark:text-red-400 flex-shrink-0">执行失败</span>
+              )}
+              {message.commandStatus === 'cancelled' && (
+                <span className="text-xs text-red-600 dark:text-red-400 flex-shrink-0">已停止</span>
+              )}
+              {message.commandStatus === 'timeout' && (
+                <span className="text-xs text-amber-600 dark:text-amber-400 flex-shrink-0">等待超时</span>
               )}
               {message.commandStatus === 'rejected' && (
                 <span className="text-xs text-red-600 dark:text-red-400 flex-shrink-0">✗ 已拒绝</span>

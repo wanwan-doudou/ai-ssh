@@ -8,13 +8,50 @@ interface ProviderFormProps {
   onClose: () => void;
 }
 
-const providerTypes: { value: ProviderType; label: string; description: string }[] = [
-  { value: "claude", label: "Claude", description: "Anthropic Claude API" },
-  { value: "openai", label: "OpenAI", description: "GPT-4, GPT-3.5 等" },
-  { value: "codex", label: "Codex", description: "OpenAI Codex API" },
-  { value: "gemini", label: "Gemini", description: "Google Gemini API" },
-  { value: "custom", label: "自定义", description: "兼容 OpenAI 格式的 API" },
+type SelectableProviderType = Exclude<ProviderType, "codex">;
+
+const providerTypes: { value: SelectableProviderType; label: string; description: string }[] = [
+  { value: "claude", label: "Claude", description: "Anthropic Messages API" },
+  { value: "openai", label: "OpenAI", description: "OpenAI Chat Completions" },
+  { value: "gemini", label: "Gemini", description: "Google Gemini 原生 API" },
+  { value: "custom", label: "自定义", description: "OpenAI 兼容格式 API" },
 ];
+
+const providerDefaults: Record<SelectableProviderType, { baseUrl: string; model: string; baseUrlHelp: string }> = {
+  claude: {
+    baseUrl: "https://api.anthropic.com",
+    model: "claude-3-5-haiku-latest",
+    baseUrlHelp: "Claude 原生 Messages API。可填根地址或 /v1，系统会自动拼到 /v1/messages。",
+  },
+  openai: {
+    baseUrl: "https://api.openai.com",
+    model: "gpt-4.1-mini",
+    baseUrlHelp: "OpenAI Chat Completions。可填根地址或 /v1，系统会自动拼到 /v1/chat/completions。",
+  },
+  gemini: {
+    baseUrl: "https://generativelanguage.googleapis.com",
+    model: "gemini-2.5-flash",
+    baseUrlHelp: "Gemini 原生 API。可填根地址或 /v1beta，系统会调用 /models/{model}:generateContent。",
+  },
+  custom: {
+    baseUrl: "https://api.example.com/v1",
+    model: "gpt-4o-mini",
+    baseUrlHelp: "OpenAI 兼容接口。可填根地址、/v1，或 Gemini 的 /v1beta/openai 路径。",
+  },
+};
+
+const getProviderDescription = (type: ProviderType) => {
+  if (type === "codex") {
+    return "Codex 不是普通 Chat Completions Provider；请改用 OpenAI 或自定义接口。";
+  }
+
+  return providerTypes.find((item) => item.value === type)?.description || "";
+};
+
+const getProviderDefaults = (type: ProviderType) => {
+  if (type === "codex") return providerDefaults.openai;
+  return providerDefaults[type];
+};
 
 export function ProviderForm({ provider, onClose }: ProviderFormProps) {
   const { addProvider, updateProvider } = useProviderStore();
@@ -52,6 +89,9 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
     if (!formData.apiKey.trim()) {
       newErrors.apiKey = "请输入 API Key";
     }
+    if (formData.type === "codex") {
+      newErrors.type = "Codex 暂不作为独立 Provider 支持，请选择 OpenAI 或自定义";
+    }
     if (formData.type === "custom" && !formData.baseUrl.trim()) {
       newErrors.baseUrl = "自定义类型需要填写 Base URL";
     }
@@ -68,11 +108,11 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
     if (!validate() || isSubmitting) return;
 
     const providerData: Omit<Provider, "id" | "createdAt" | "updatedAt" | "isActive"> = {
-      name: formData.name,
+      name: formData.name.trim(),
       type: formData.type,
-      apiKey: formData.apiKey,
-      baseUrl: formData.baseUrl || undefined,
-      model: formData.model || undefined,
+      apiKey: formData.apiKey.trim(),
+      baseUrl: formData.baseUrl.trim() || undefined,
+      model: formData.model.trim() || undefined,
     };
 
     setIsSubmitting(true);
@@ -91,16 +131,8 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
     }
   };
 
-  // 根据类型获取默认 base URL
-  const getDefaultBaseUrl = (type: ProviderType) => {
-    switch (type) {
-      case "claude": return "https://api.anthropic.com";
-      case "openai": return "https://api.openai.com";
-      case "codex": return "https://api.openai.com";
-      case "gemini": return "https://generativelanguage.googleapis.com";
-      default: return "";
-    }
-  };
+  const currentDefaults = getProviderDefaults(formData.type);
+  const typeDescription = getProviderDescription(formData.type);
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
@@ -142,7 +174,7 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
             <label className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
               Provider 类型
             </label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2">
               {providerTypes.map((type) => (
                 <button
                   key={type.value}
@@ -159,8 +191,9 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
               ))}
             </div>
             <p className="text-xs text-surface-500 mt-2">
-              {providerTypes.find(t => t.value === formData.type)?.description}
+              {typeDescription}
             </p>
+            {errors.type && <p className="text-red-500 dark:text-red-400 text-xs mt-1">{errors.type}</p>}
           </div>
 
           {/* API Key */}
@@ -190,15 +223,16 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
           {/* Base URL */}
           <div>
             <label className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5">
-              Base URL <span className="text-surface-500">(可选，使用默认)</span>
+              Base URL <span className="text-surface-500">{formData.type === "custom" ? "(必填)" : "(可选，使用默认)"}</span>
             </label>
             <input
               type="text"
               value={formData.baseUrl}
               onChange={(e) => setFormData({ ...formData, baseUrl: e.target.value })}
-              placeholder={getDefaultBaseUrl(formData.type) || "https://api.example.com"}
+              placeholder={currentDefaults.baseUrl}
               className="input"
             />
+            <p className="text-xs text-surface-500 mt-1">{currentDefaults.baseUrlHelp}</p>
             {errors.baseUrl && <p className="text-red-500 dark:text-red-400 text-xs mt-1">{errors.baseUrl}</p>}
           </div>
 
@@ -211,9 +245,10 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
               type="text"
               value={formData.model}
               onChange={(e) => setFormData({ ...formData, model: e.target.value })}
-              placeholder="例如：claude-3-opus-20240229"
+              placeholder={`留空默认：${currentDefaults.model}`}
               className="input"
             />
+            <p className="text-xs text-surface-500 mt-1">建议明确填写你账号可用的模型 ID；留空时使用上面的默认值。</p>
           </div>
 
           {/* 错误提示 */}
