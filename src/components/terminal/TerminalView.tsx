@@ -457,8 +457,10 @@ export function TerminalView() {
     };
   }, [activeSessionId, activeSession?.isConnected, fetchServerInfo]);
 
+  // 侧边栏展开 或 详情标签为 overview/disk 时，获取文件系统数据
+  const needFilesystems = showServerInfoPanel || activeDetailTab?.kind === "overview" || activeDetailTab?.kind === "disk";
   useEffect(() => {
-    if (!activeSessionId || !activeSession?.isConnected || (activeDetailTab?.kind !== "overview" && activeDetailTab?.kind !== "disk")) {
+    if (!activeSessionId || !activeSession?.isConnected || !needFilesystems) {
       return;
     }
 
@@ -473,7 +475,7 @@ export function TerminalView() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [activeSessionId, activeSession?.isConnected, activeDetailTab?.kind, fetchFilesystems]);
+  }, [activeSessionId, activeSession?.isConnected, needFilesystems, fetchFilesystems]);
 
   useEffect(() => {
     if (!activeSessionId || !activeSession?.isConnected || activeDetailTab?.kind !== "processes") {
@@ -710,6 +712,7 @@ export function TerminalView() {
                 onToggle={() => setShowServerInfoPanel((prev) => !prev)}
                 session={activeSession}
                 info={serverInfo}
+                filesystems={filesystems}
                 isLoading={isServerInfoLoading}
                 error={serverInfoError}
                 onRefresh={() => activeSession && fetchServerInfo(activeSession.id, false)}
@@ -848,22 +851,36 @@ interface ServerInfoPanelProps {
   onToggle: () => void;
   session: any | null;
   info: ServerRuntimeInfo | null;
+  filesystems: ServerFilesystemInfo[];
   isLoading: boolean;
   error: string | null;
   onRefresh: () => void;
   onOpenDetail: (kind: ServerDetailKind) => void;
 }
 
-function ServerInfoPanel({ visible, onToggle, session, info, isLoading, error, onRefresh, onOpenDetail }: ServerInfoPanelProps) {
+// 过滤掉虚拟文件系统，只显示真实磁盘分区
+const VIRTUAL_FS_TYPES = new Set(["tmpfs", "devtmpfs", "sysfs", "proc", "devpts", "securityfs", "cgroup", "cgroup2", "pstore", "bpf", "debugfs", "tracefs", "hugetlbfs", "mqueue", "configfs", "fusectl", "autofs", "efivarfs", "nsfs", "fuse.gvfsd-fuse", "ramfs", "rpc_pipefs", "nfsd"]);
+const VIRTUAL_FS_PREFIXES = ["/proc", "/sys", "/dev/pts", "/run"];
+
+function isRealFilesystem(fs: ServerFilesystemInfo): boolean {
+  // 按类型过滤
+  if (VIRTUAL_FS_TYPES.has(fs.fsType.toLowerCase())) return false;
+  // overlay 文件系统（docker）也过滤掉
+  if (fs.fsType.toLowerCase() === "overlay") return false;
+  // 按挂载点过滤
+  if (VIRTUAL_FS_PREFIXES.some((prefix) => fs.mountPoint.startsWith(prefix))) return false;
+  // 大小为 0 的过滤掉
+  if (fs.sizeKb === 0) return false;
+  return true;
+}
+
+function ServerInfoPanel({ visible, onToggle, session, info, filesystems, isLoading, error, onRefresh, onOpenDetail }: ServerInfoPanelProps) {
   const isConnected = Boolean(session?.isConnected);
   const memoryPercent = info && info.memoryTotalKb > 0
     ? (info.memoryUsedKb / info.memoryTotalKb) * 100
     : 0;
-  const diskPercent = info
-    ? (info.diskUsePercent > 0
-      ? info.diskUsePercent
-      : (info.diskTotalKb > 0 ? (info.diskUsedKb / info.diskTotalKb) * 100 : 0))
-    : 0;
+  // 过滤出真实磁盘分区用于侧边栏展示
+  const realFilesystems = filesystems.filter(isRealFilesystem);
   const detailCardClass = "w-full rounded-lg border border-surface-200 dark:border-surface-800 bg-white/80 dark:bg-surface-950/50 p-3 space-y-2 text-left transition-colors hover:border-primary-300 dark:hover:border-primary-700";
 
   if (!visible) {
@@ -1000,19 +1017,50 @@ function ServerInfoPanel({ visible, onToggle, session, info, isLoading, error, o
               className={detailCardClass}
               title="查看磁盘详情"
             >
-              <div className="flex items-center justify-between text-xs text-surface-700 dark:text-surface-200">
-                <div className="flex items-center gap-2">
-                  <HardDrive className="w-3.5 h-3.5" />
-                  <span className="font-medium">磁盘 /</span>
+              <div className="flex items-center gap-2 text-surface-700 dark:text-surface-200 mb-1">
+                <HardDrive className="w-3.5 h-3.5" />
+                <span className="text-xs font-medium">磁盘</span>
+              </div>
+              {realFilesystems.length > 0 ? (
+                <div className="space-y-2">
+                  {realFilesystems.map((fs) => {
+                    const pct = fs.usePercent > 0 ? fs.usePercent : (fs.sizeKb > 0 ? (fs.usedKb / fs.sizeKb) * 100 : 0);
+                    return (
+                      <div key={`${fs.fileSystem}-${fs.mountPoint}`}>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-surface-600 dark:text-surface-300 truncate max-w-[60%]" title={fs.mountPoint}>{fs.mountPoint}</span>
+                          <span className="text-surface-700 dark:text-surface-200">{formatPercent(pct)}</span>
+                        </div>
+                        <div className="w-full h-1 rounded-full bg-surface-200 dark:bg-surface-800 overflow-hidden mt-0.5">
+                          <div className={`h-full rounded-full ${pct > 90 ? 'bg-red-500' : pct > 70 ? 'bg-amber-500' : 'bg-teal-500'}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                        </div>
+                        <p className="text-[11px] text-surface-500 dark:text-surface-400 mt-0.5">
+                          {formatBytes(bytesFromKb(fs.usedKb))} / {formatBytes(bytesFromKb(fs.sizeKb))}
+                        </p>
+                      </div>
+                    );
+                  })}
                 </div>
-                <span>{formatPercent(diskPercent)}</span>
-              </div>
-              <div className="w-full h-1.5 rounded-full bg-surface-200 dark:bg-surface-800 overflow-hidden">
-                <div className="h-full bg-teal-500 rounded-full" style={{ width: `${Math.min(diskPercent, 100)}%` }} />
-              </div>
-              <p className="text-xs text-surface-500 dark:text-surface-400">
-                {formatBytes(bytesFromKb(info.diskUsedKb))} / {formatBytes(bytesFromKb(info.diskTotalKb))}
-              </p>
+              ) : (
+                /* 回退：文件系统数据未加载时使用 RuntimeInfo 中的根分区数据 */
+                (() => {
+                  const pct = info.diskUsePercent > 0 ? info.diskUsePercent : (info.diskTotalKb > 0 ? (info.diskUsedKb / info.diskTotalKb) * 100 : 0);
+                  return (
+                    <>
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-surface-600 dark:text-surface-300">/</span>
+                        <span className="text-surface-700 dark:text-surface-200">{formatPercent(pct)}</span>
+                      </div>
+                      <div className="w-full h-1 rounded-full bg-surface-200 dark:bg-surface-800 overflow-hidden mt-0.5">
+                        <div className="h-full bg-teal-500 rounded-full" style={{ width: `${Math.min(pct, 100)}%` }} />
+                      </div>
+                      <p className="text-[11px] text-surface-500 dark:text-surface-400 mt-0.5">
+                        {formatBytes(bytesFromKb(info.diskUsedKb))} / {formatBytes(bytesFromKb(info.diskTotalKb))}
+                      </p>
+                    </>
+                  );
+                })()
+              )}
               <p className="text-[11px] text-primary-600 dark:text-primary-400">点击打开磁盘标签（约 3 秒刷新）</p>
             </button>
 
