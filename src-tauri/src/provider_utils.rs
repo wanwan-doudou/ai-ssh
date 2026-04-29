@@ -3,18 +3,32 @@ use crate::models::ProviderType;
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com";
 pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 pub const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com";
+pub const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4.1-mini";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-3-5-haiku-latest";
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash";
+pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
 pub const DEFAULT_CUSTOM_MODEL: &str = "gpt-4o-mini";
+
+/// 根据 Provider 类型返回默认的 Base URL（用于 OpenAI 兼容类 Provider）
+pub fn default_base_url_for_provider(provider_type: &ProviderType) -> &'static str {
+    match provider_type {
+        ProviderType::Claude => DEFAULT_ANTHROPIC_BASE_URL,
+        ProviderType::Openai => DEFAULT_OPENAI_BASE_URL,
+        ProviderType::Gemini => DEFAULT_GEMINI_BASE_URL,
+        ProviderType::Deepseek => DEFAULT_DEEPSEEK_BASE_URL,
+        ProviderType::Custom => DEFAULT_OPENAI_BASE_URL,
+    }
+}
 
 pub fn default_model_for_provider(provider_type: &ProviderType) -> &'static str {
     match provider_type {
         ProviderType::Claude => DEFAULT_CLAUDE_MODEL,
         ProviderType::Openai => DEFAULT_OPENAI_MODEL,
         ProviderType::Gemini => DEFAULT_GEMINI_MODEL,
-        ProviderType::Custom | ProviderType::Codex => DEFAULT_CUSTOM_MODEL,
+        ProviderType::Deepseek => DEFAULT_DEEPSEEK_MODEL,
+        ProviderType::Custom => DEFAULT_CUSTOM_MODEL,
     }
 }
 
@@ -54,9 +68,6 @@ pub fn openai_compatible_url(base_url: Option<&str>, default_base_url: &str, end
     }
 }
 
-pub fn openai_chat_completions_url(base_url: Option<&str>) -> String {
-    openai_compatible_url(base_url, DEFAULT_OPENAI_BASE_URL, "chat/completions")
-}
 
 pub fn openai_models_url(base_url: Option<&str>) -> String {
     openai_compatible_url(base_url, DEFAULT_OPENAI_BASE_URL, "models")

@@ -8,16 +8,16 @@ interface ProviderFormProps {
   onClose: () => void;
 }
 
-type SelectableProviderType = Exclude<ProviderType, "codex">;
 
-const providerTypes: { value: SelectableProviderType; label: string; description: string }[] = [
+const providerTypes: { value: ProviderType; label: string; description: string }[] = [
   { value: "claude", label: "Claude", description: "Anthropic Messages API" },
   { value: "openai", label: "OpenAI", description: "OpenAI Chat Completions" },
   { value: "gemini", label: "Gemini", description: "Google Gemini 原生 API" },
+  { value: "deepseek", label: "DeepSeek", description: "DeepSeek Chat Completions（OpenAI 兼容）" },
   { value: "custom", label: "自定义", description: "OpenAI 兼容格式 API" },
 ];
 
-const providerDefaults: Record<SelectableProviderType, { baseUrl: string; model: string; baseUrlHelp: string }> = {
+const providerDefaults: Record<ProviderType, { baseUrl: string; model: string; baseUrlHelp: string }> = {
   claude: {
     baseUrl: "https://api.anthropic.com",
     model: "claude-3-5-haiku-latest",
@@ -33,6 +33,11 @@ const providerDefaults: Record<SelectableProviderType, { baseUrl: string; model:
     model: "gemini-2.5-flash",
     baseUrlHelp: "Gemini 原生 API。可填根地址或 /v1beta，系统会调用 /models/{model}:generateContent。",
   },
+  deepseek: {
+    baseUrl: "https://api.deepseek.com",
+    model: "deepseek-chat",
+    baseUrlHelp: "DeepSeek Chat API（OpenAI 兼容格式）。可填根地址，系统会自动拼到 /v1/chat/completions。",
+  },
   custom: {
     baseUrl: "https://api.example.com/v1",
     model: "gpt-4o-mini",
@@ -41,15 +46,10 @@ const providerDefaults: Record<SelectableProviderType, { baseUrl: string; model:
 };
 
 const getProviderDescription = (type: ProviderType) => {
-  if (type === "codex") {
-    return "Codex 不是普通 Chat Completions Provider；请改用 OpenAI 或自定义接口。";
-  }
-
   return providerTypes.find((item) => item.value === type)?.description || "";
 };
 
 const getProviderDefaults = (type: ProviderType) => {
-  if (type === "codex") return providerDefaults.openai;
   return providerDefaults[type];
 };
 
@@ -88,9 +88,6 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
     }
     if (!formData.apiKey.trim()) {
       newErrors.apiKey = "请输入 API Key";
-    }
-    if (formData.type === "codex") {
-      newErrors.type = "Codex 暂不作为独立 Provider 支持，请选择 OpenAI 或自定义";
     }
     if (formData.type === "custom" && !formData.baseUrl.trim()) {
       newErrors.baseUrl = "自定义类型需要填写 Base URL";

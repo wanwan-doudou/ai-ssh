@@ -3,7 +3,7 @@
 use crate::models::{Provider, ProviderType};
 use crate::provider_utils::{
     anthropic_messages_url, gemini_models_url, openai_compatible_url, openai_models_url,
-    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CLAUDE_MODEL, DEFAULT_DEEPSEEK_BASE_URL,
 };
 use crate::AppState;
 use rusqlite::params;
@@ -159,6 +159,7 @@ pub async fn test_provider_connection(
         "claude" => test_claude(&client, &api_key, base_url).await,
         "openai" => test_openai(&client, &api_key, base_url).await,
         "gemini" => test_gemini(&client, &api_key, base_url).await,
+        "deepseek" => test_deepseek(&client, &api_key, base_url).await,
         "custom" => {
             if let Some(url) = base_url {
                 test_custom(&client, &api_key, &url).await
@@ -166,7 +167,6 @@ pub async fn test_provider_connection(
                 Err("自定义类型需要提供 Base URL".to_string())
             }
         }
-        "codex" => Err("Codex Provider 暂不支持普通聊天接口；请使用 OpenAI Provider。".to_string()),
         _ => Err(format!("不支持的 Provider 类型: {}", provider_type)),
     };
     
@@ -272,6 +272,39 @@ async fn test_gemini(
         Ok("Gemini API 连接成功".to_string())
     } else if status.as_u16() == 400 || status.as_u16() == 403 {
         Err("API Key 无效或权限不足".to_string())
+    } else {
+        let body = response.text().await.unwrap_or_default();
+        Err(format!("请求失败 ({}): {}", status, body))
+    }
+}
+
+/// 测试 DeepSeek API（OpenAI 兼容格式）
+async fn test_deepseek(
+    client: &reqwest::Client,
+    api_key: &str,
+    base_url: Option<String>,
+) -> Result<String, String> {
+    // 使用 models 端点测试，不消耗 tokens
+    let endpoint = openai_compatible_url(
+        base_url.as_deref(),
+        DEFAULT_DEEPSEEK_BASE_URL,
+        "models",
+    );
+
+    let response = client
+        .get(&endpoint)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {}", e))?;
+
+    let status = response.status();
+    if status.is_success() {
+        Ok("DeepSeek API 连接成功".to_string())
+    } else if status.as_u16() == 401 {
+        Err("API Key 无效或已过期".to_string())
+    } else if status.as_u16() == 403 {
+        Err("API Key 权限不足".to_string())
     } else {
         let body = response.text().await.unwrap_or_default();
         Err(format!("请求失败 ({}): {}", status, body))

@@ -27,7 +27,7 @@ export interface Provider {
   updatedAt: number;
 }
 
-export type ProviderType = "claude" | "openai" | "codex" | "gemini" | "custom";
+export type ProviderType = "claude" | "openai" | "gemini" | "deepseek" | "custom";
 
 // 终端会话
 export interface TerminalSession {

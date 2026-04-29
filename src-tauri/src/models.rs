@@ -107,8 +107,8 @@ pub struct Provider {
 pub enum ProviderType {
     Claude,
     Openai,
-    Codex,
     Gemini,
+    Deepseek,
     Custom,
 }
 
@@ -117,8 +117,8 @@ impl std::fmt::Display for ProviderType {
         match self {
             ProviderType::Claude => write!(f, "claude"),
             ProviderType::Openai => write!(f, "openai"),
-            ProviderType::Codex => write!(f, "codex"),
             ProviderType::Gemini => write!(f, "gemini"),
+            ProviderType::Deepseek => write!(f, "deepseek"),
             ProviderType::Custom => write!(f, "custom"),
         }
     }
@@ -131,8 +131,8 @@ impl std::str::FromStr for ProviderType {
         match s.to_lowercase().as_str() {
             "claude" => Ok(ProviderType::Claude),
             "openai" => Ok(ProviderType::Openai),
-            "codex" => Ok(ProviderType::Codex),
             "gemini" => Ok(ProviderType::Gemini),
+            "deepseek" => Ok(ProviderType::Deepseek),
             "custom" => Ok(ProviderType::Custom),
             _ => Err(format!("未知的 Provider 类型: {}", s)),
         }

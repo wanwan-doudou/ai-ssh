@@ -16,8 +16,8 @@ interface TestConnectionResult {
 const providerIcons: Record<string, { color: string; bg: string }> = {
   claude: { color: "text-orange-400", bg: "bg-orange-500/20" },
   openai: { color: "text-green-400", bg: "bg-green-500/20" },
-  codex: { color: "text-blue-400", bg: "bg-blue-500/20" },
   gemini: { color: "text-purple-400", bg: "bg-purple-500/20" },
+  deepseek: { color: "text-sky-400", bg: "bg-sky-500/20" },
   custom: { color: "text-surface-400", bg: "bg-surface-500/20" },
 };
 

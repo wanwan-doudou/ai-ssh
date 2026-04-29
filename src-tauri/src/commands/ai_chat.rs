@@ -1,7 +1,7 @@
 use crate::models::{Provider, ProviderType};
 use crate::provider_utils::{
-    anthropic_messages_url, default_model_for_provider, gemini_generate_content_url,
-    openai_chat_completions_url,
+    anthropic_messages_url, default_base_url_for_provider, default_model_for_provider,
+    gemini_generate_content_url, openai_compatible_url,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -80,7 +80,7 @@ docker ps
         .map_err(|e| e.to_string())?;
 
     let response_text = match provider.provider_type {
-        ProviderType::Openai | ProviderType::Custom => {
+        ProviderType::Openai | ProviderType::Custom | ProviderType::Deepseek => {
             call_openai_compatible(&client, &provider, system_prompt, &message, &history_messages).await?
         }
         ProviderType::Claude => {
@@ -88,9 +88,6 @@ docker ps
         }
         ProviderType::Gemini => {
             call_gemini(&client, &provider, system_prompt, &message, &history_messages).await?
-        }
-        ProviderType::Codex => {
-            return Err("Codex Provider 暂不支持普通 Chat Completions。请使用 OpenAI Provider，或等后续接入 Responses API。".to_string());
         }
     };
 
@@ -172,7 +169,7 @@ docker ps
 
     // 5. 流式调用 AI API
     let result = match provider.provider_type {
-        ProviderType::Openai | ProviderType::Custom => {
+        ProviderType::Openai | ProviderType::Custom | ProviderType::Deepseek => {
             call_openai_compatible_stream(&app, &client, &provider, system_prompt, &message, &history_messages, &event_name).await
         }
         ProviderType::Claude => {
@@ -180,9 +177,6 @@ docker ps
         }
         ProviderType::Gemini => {
             call_gemini_stream(&app, &client, &provider, system_prompt, &message, &history_messages, &event_name).await
-        }
-        ProviderType::Codex => {
-            Err("Codex Provider 暂不支持普通 Chat Completions。请使用 OpenAI Provider，或等后续接入 Responses API。".to_string())
         }
     };
 
@@ -207,7 +201,11 @@ async fn call_openai_compatible(
     user_message: &str,
     history: &[HistoryMessage],  // 新增：历史消息
 ) -> Result<String, String> {
-    let url = openai_chat_completions_url(provider.base_url.as_deref());
+    let url = openai_compatible_url(
+        provider.base_url.as_deref(),
+        default_base_url_for_provider(&provider.provider_type),
+        "chat/completions",
+    );
     let model = provider
         .model
         .clone()
@@ -325,7 +323,11 @@ async fn call_openai_compatible_stream(
     history: &[HistoryMessage],
     event_name: &str,
 ) -> Result<String, String> {
-    let url = openai_chat_completions_url(provider.base_url.as_deref());
+    let url = openai_compatible_url(
+        provider.base_url.as_deref(),
+        default_base_url_for_provider(&provider.provider_type),
+        "chat/completions",
+    );
     let model = provider
         .model
         .clone()
