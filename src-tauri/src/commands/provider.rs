@@ -3,7 +3,7 @@
 use crate::models::{Provider, ProviderType};
 use crate::provider_utils::{
     anthropic_messages_url, gemini_models_url, openai_compatible_url, openai_models_url,
-    DEFAULT_CLAUDE_MODEL, DEFAULT_DEEPSEEK_BASE_URL,
+    DEFAULT_CLAUDE_MODEL, DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_OPENAI_BASE_URL,
 };
 use crate::AppState;
 use rusqlite::params;
@@ -145,6 +145,7 @@ pub async fn test_provider_connection(
     provider_type: String,
     api_key: String,
     base_url: Option<String>,
+    model: Option<String>,
 ) -> Result<TestConnectionResult, String> {
     use std::time::Instant;
     
@@ -157,12 +158,12 @@ pub async fn test_provider_connection(
     // 根据 provider 类型选择测试端点
     let result = match provider_type.to_lowercase().as_str() {
         "claude" => test_claude(&client, &api_key, base_url).await,
-        "openai" => test_openai(&client, &api_key, base_url).await,
+        "openai" => test_openai(&client, &api_key, base_url, model).await,
         "gemini" => test_gemini(&client, &api_key, base_url).await,
-        "deepseek" => test_deepseek(&client, &api_key, base_url).await,
+        "deepseek" => test_deepseek(&client, &api_key, base_url, model).await,
         "custom" => {
             if let Some(url) = base_url {
-                test_custom(&client, &api_key, &url).await
+                test_custom(&client, &api_key, &url, model).await
             } else {
                 Err("自定义类型需要提供 Base URL".to_string())
             }
@@ -227,7 +228,20 @@ async fn test_openai(
     client: &reqwest::Client,
     api_key: &str,
     base_url: Option<String>,
+    model: Option<String>,
 ) -> Result<String, String> {
+    if let Some(model) = normalize_test_model(model) {
+        return test_openai_compatible_chat(
+            client,
+            api_key,
+            base_url.as_deref(),
+            DEFAULT_OPENAI_BASE_URL,
+            &model,
+            "OpenAI API 连接成功，模型可用",
+        )
+        .await;
+    }
+
     // 使用 models 端点测试，不消耗 tokens
     let endpoint = openai_models_url(base_url.as_deref());
     
@@ -283,7 +297,20 @@ async fn test_deepseek(
     client: &reqwest::Client,
     api_key: &str,
     base_url: Option<String>,
+    model: Option<String>,
 ) -> Result<String, String> {
+    if let Some(model) = normalize_test_model(model) {
+        return test_openai_compatible_chat(
+            client,
+            api_key,
+            base_url.as_deref(),
+            DEFAULT_DEEPSEEK_BASE_URL,
+            &model,
+            "DeepSeek API 连接成功，模型可用",
+        )
+        .await;
+    }
+
     // 使用 models 端点测试，不消耗 tokens
     let endpoint = openai_compatible_url(
         base_url.as_deref(),
@@ -316,7 +343,20 @@ async fn test_custom(
     client: &reqwest::Client,
     api_key: &str,
     base_url: &str,
+    model: Option<String>,
 ) -> Result<String, String> {
+    if let Some(model) = normalize_test_model(model) {
+        return test_openai_compatible_chat(
+            client,
+            api_key,
+            Some(base_url),
+            base_url,
+            &model,
+            "自定义 API 连接成功，模型可用",
+        )
+        .await;
+    }
+
     // 尝试 OpenAI 兼容的 models 端点
     let endpoint = openai_compatible_url(Some(base_url), base_url, "models");
     
@@ -332,6 +372,47 @@ async fn test_custom(
         Ok("自定义 API 连接成功".to_string())
     } else if status.as_u16() == 401 {
         Err("API Key 无效".to_string())
+    } else {
+        let body = response.text().await.unwrap_or_default();
+        Err(format!("请求失败 ({}): {}", status, body))
+    }
+}
+
+fn normalize_test_model(model: Option<String>) -> Option<String> {
+    model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+async fn test_openai_compatible_chat(
+    client: &reqwest::Client,
+    api_key: &str,
+    base_url: Option<&str>,
+    default_base_url: &str,
+    model: &str,
+    success_message: &str,
+) -> Result<String, String> {
+    let endpoint = openai_compatible_url(base_url, default_base_url, "chat/completions");
+
+    let response = client
+        .post(&endpoint)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 1
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {}", e))?;
+
+    let status = response.status();
+    if status.is_success() {
+        Ok(success_message.to_string())
+    } else if status.as_u16() == 401 {
+        Err("API Key 无效或已过期".to_string())
+    } else if status.as_u16() == 403 {
+        Err("API Key 权限不足".to_string())
     } else {
         let body = response.text().await.unwrap_or_default();
         Err(format!("请求失败 ({}): {}", status, body))

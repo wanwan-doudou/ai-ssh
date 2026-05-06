@@ -141,6 +141,7 @@ function ProviderCard({ provider, onEdit, onSetActive }: ProviderCardProps) {
         providerType: provider.type,
         apiKey: provider.apiKey,
         baseUrl: provider.baseUrl || null,
+        model: provider.model || null,
       });
       setTestResult(result);
     } catch (e) {
