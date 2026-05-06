@@ -285,7 +285,7 @@ export function parseInstrumentedCommandOutput(
   const markers = getCommandMarkers(markerId);
   const normalizedOutput = output.replace(/\r/g, '');
   const lines = normalizedOutput.split('\n');
-  const endPattern = new RegExp(`^${escapeRegExp(markers.end)}:(\\d+)$`);
+  const endPattern = new RegExp(`${escapeRegExp(markers.end)}:(\\d+)`);
 
   let startLineIndex = -1;
   let endLineIndex = -1;
@@ -294,7 +294,7 @@ export function parseInstrumentedCommandOutput(
   for (let index = 0; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
 
-    if (trimmed === markers.start) {
+    if (trimmed === markers.start || trimmed.includes(markers.start)) {
       startLineIndex = index;
       continue;
     }

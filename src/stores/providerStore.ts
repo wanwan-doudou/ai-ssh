@@ -54,6 +54,7 @@ export const useProviderStore = create<ProviderStore>()((set, get) => ({
         apiKey: providerData.apiKey,
         baseUrl: providerData.baseUrl || null,
         model: providerData.model || null,
+        contextWindowTokens: providerData.contextWindowTokens ?? null,
       });
 
       set((state) => {
@@ -85,6 +86,9 @@ export const useProviderStore = create<ProviderStore>()((set, get) => ({
         apiKey: providerData.apiKey ?? currentProvider.apiKey,
         baseUrl: providerData.baseUrl ?? currentProvider.baseUrl ?? null,
         model: providerData.model ?? currentProvider.model ?? null,
+        contextWindowTokens: providerData.contextWindowTokens !== undefined
+          ? providerData.contextWindowTokens
+          : currentProvider.contextWindowTokens ?? null,
       });
 
       set((state) => ({

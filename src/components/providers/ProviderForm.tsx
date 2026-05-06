@@ -63,6 +63,7 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
     apiKey: "",
     baseUrl: "",
     model: "",
+    contextWindowTokens: "",
   });
 
   const [showApiKey, setShowApiKey] = useState(false);
@@ -76,6 +77,7 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
         apiKey: provider.apiKey,
         baseUrl: provider.baseUrl || "",
         model: provider.model || "",
+        contextWindowTokens: provider.contextWindowTokens ? String(provider.contextWindowTokens) : "",
       });
     }
   }, [provider]);
@@ -91,6 +93,12 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
     }
     if (formData.type === "custom" && !formData.baseUrl.trim()) {
       newErrors.baseUrl = "自定义类型需要填写 Base URL";
+    }
+    if (formData.contextWindowTokens.trim()) {
+      const contextWindowTokens = Number(formData.contextWindowTokens);
+      if (!Number.isInteger(contextWindowTokens) || contextWindowTokens <= 0) {
+        newErrors.contextWindowTokens = "请输入大于 0 的整数 tokens";
+      }
     }
 
     setErrors(newErrors);
@@ -110,6 +118,9 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
       apiKey: formData.apiKey.trim(),
       baseUrl: formData.baseUrl.trim() || undefined,
       model: formData.model.trim() || undefined,
+      contextWindowTokens: formData.contextWindowTokens.trim()
+        ? Number(formData.contextWindowTokens)
+        : null,
     };
 
     setIsSubmitting(true);
@@ -246,6 +257,24 @@ export function ProviderForm({ provider, onClose }: ProviderFormProps) {
               className="input"
             />
             <p className="text-xs text-surface-500 mt-1">建议明确填写你账号可用的模型 ID；留空时使用上面的默认值。</p>
+          </div>
+
+          {/* Context Window */}
+          <div>
+            <label className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5">
+              上下文窗口 tokens <span className="text-surface-500">(可选)</span>
+            </label>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={formData.contextWindowTokens}
+              onChange={(e) => setFormData({ ...formData, contextWindowTokens: e.target.value })}
+              placeholder="留空默认：256000"
+              className="input"
+            />
+            <p className="text-xs text-surface-500 mt-1">不填写时统一按 256000 tokens 计算；第三方中转或长上下文套餐可按文档填写更大的值。</p>
+            {errors.contextWindowTokens && <p className="text-red-500 dark:text-red-400 text-xs mt-1">{errors.contextWindowTokens}</p>}
           </div>
 
           {/* 错误提示 */}

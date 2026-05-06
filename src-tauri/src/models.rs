@@ -42,7 +42,7 @@ impl std::fmt::Display for AuthType {
 
 impl std::str::FromStr for AuthType {
     type Err = String;
-    
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "password" => Ok(AuthType::Password),
@@ -96,6 +96,8 @@ pub struct Provider {
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<i64>,
     pub is_active: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -126,7 +128,7 @@ impl std::fmt::Display for ProviderType {
 
 impl std::str::FromStr for ProviderType {
     type Err = String;
-    
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "claude" => Ok(ProviderType::Claude),
@@ -138,4 +140,3 @@ impl std::str::FromStr for ProviderType {
         }
     }
 }
-

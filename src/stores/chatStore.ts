@@ -7,6 +7,8 @@ interface ChatSession {
   isLoading: boolean;
   // 等待命令输出状态（区分于 AI 思考状态）
   waitingForOutput: boolean;
+  taskGoal?: string | null;
+  taskSummary?: string;
 }
 
 interface ChatStore {
@@ -27,6 +29,10 @@ interface ChatStore {
   setLoading: (sessionId: string, loading: boolean) => void;
   // 设置等待输出状态
   setWaitingForOutput: (sessionId: string, waiting: boolean) => void;
+  // 获取任务记忆
+  getTaskMemory: (sessionId: string) => { goal: string | null; summary: string };
+  // 设置任务记忆
+  setTaskMemory: (sessionId: string, memory: { goal?: string | null; summary?: string }) => void;
   // 切换操作模式
   toggleOperationMode: () => void;
   // 设置操作模式
@@ -51,11 +57,19 @@ export const useChatStore = create<ChatStore>()(
         const session = get().sessions.get(sessionId);
         return session?.messages || [];
       },
+
+      getTaskMemory: (sessionId: string) => {
+        const session = get().sessions.get(sessionId);
+        return {
+          goal: session?.taskGoal ?? null,
+          summary: session?.taskSummary ?? '',
+        };
+      },
       
       addMessage: (sessionId: string, message) => {
         set((state) => {
           const sessions = new Map(state.sessions);
-          const session = sessions.get(sessionId) || { messages: [], isLoading: false, waitingForOutput: false };
+          const session = sessions.get(sessionId) || { messages: [], isLoading: false, waitingForOutput: false, taskGoal: null, taskSummary: '' };
           
           const newMessage: ChatMessage = {
             ...message,
@@ -93,7 +107,7 @@ export const useChatStore = create<ChatStore>()(
       setLoading: (sessionId: string, loading: boolean) => {
         set((state) => {
           const sessions = new Map(state.sessions);
-          const session = sessions.get(sessionId) || { messages: [], isLoading: false, waitingForOutput: false };
+          const session = sessions.get(sessionId) || { messages: [], isLoading: false, waitingForOutput: false, taskGoal: null, taskSummary: '' };
           sessions.set(sessionId, { ...session, isLoading: loading });
           return { sessions };
         });
@@ -102,8 +116,21 @@ export const useChatStore = create<ChatStore>()(
       setWaitingForOutput: (sessionId: string, waiting: boolean) => {
         set((state) => {
           const sessions = new Map(state.sessions);
-          const session = sessions.get(sessionId) || { messages: [], isLoading: false, waitingForOutput: false };
+          const session = sessions.get(sessionId) || { messages: [], isLoading: false, waitingForOutput: false, taskGoal: null, taskSummary: '' };
           sessions.set(sessionId, { ...session, waitingForOutput: waiting });
+          return { sessions };
+        });
+      },
+
+      setTaskMemory: (sessionId, memory) => {
+        set((state) => {
+          const sessions = new Map(state.sessions);
+          const session = sessions.get(sessionId) || { messages: [], isLoading: false, waitingForOutput: false, taskGoal: null, taskSummary: '' };
+          sessions.set(sessionId, {
+            ...session,
+            taskGoal: memory.goal !== undefined ? memory.goal : session.taskGoal ?? null,
+            taskSummary: memory.summary !== undefined ? memory.summary : session.taskSummary ?? '',
+          });
           return { sessions };
         });
       },

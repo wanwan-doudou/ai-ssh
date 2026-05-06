@@ -22,6 +22,7 @@ export interface Provider {
   apiKey: string;
   baseUrl?: string;
   model?: string;
+  contextWindowTokens?: number | null;
   isActive: boolean;
   createdAt: number;
   updatedAt: number;

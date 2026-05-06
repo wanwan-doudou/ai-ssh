@@ -11,6 +11,7 @@ import {
   MIN_EXECUTION_TIME,
   buildInstrumentedCommand,
   createCommandMarkerId,
+  detectNewPromptLine,
   detectInteractiveProgram,
   parseInstrumentedCommandOutput,
 } from '@/stores/terminalOutputStore';
@@ -35,6 +36,23 @@ interface AiChatPanelProps {
 
 const MAX_INPUT_LINES = 5;
 const TERMINAL_CONTEXT_TAIL_LENGTH = 3000;
+const PROMPT_COMPLETION_GRACE_MS = 1000;
+const MAX_AUTO_CHAIN_COMMANDS = 100;
+const MAX_AUTO_FORMAT_REPAIR_ATTEMPTS = 1;
+const TASK_SUMMARY_COMPRESS_THRESHOLD = 16000;
+const TASK_SUMMARY_TARGET_LENGTH = 6000;
+const TASK_SUMMARY_EMERGENCY_LIMIT = 80000;
+const COMMAND_OUTPUT_SUMMARY_TAIL_LENGTH = 1600;
+
+interface AiChatResponse {
+  content: string;
+  command?: string;
+}
+
+interface AutoCommandChain {
+  commands: string[];
+  count: number;
+}
 
 export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
   const [input, setInput] = useState('');
@@ -49,6 +67,14 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     messageId?: string;
     cancelled: boolean;
   } | null>(null);
+  const autoCommandChainRef = useRef<AutoCommandChain>({
+    commands: [],
+    count: 0,
+  });
+  const autoFormatRepairAttemptsRef = useRef(0);
+  const activeTaskGoalRef = useRef<string | null>(null);
+  const activeTaskSummaryRef = useRef('');
+  const summaryCompressionInFlightRef = useRef(false);
   
   const { 
     getMessages, 
@@ -56,6 +82,8 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     updateMessage,
     setLoading,
     setWaitingForOutput,
+    getTaskMemory,
+    setTaskMemory,
     operationMode, 
     toggleOperationMode 
   } = useChatStore();
@@ -67,6 +95,186 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
   useEffect(() => {
     console.log('[AiChatPanel] Theme updated:', theme);
   }, [theme]);
+
+  useEffect(() => {
+    const memory = getTaskMemory(sessionId);
+    activeTaskGoalRef.current = memory.goal;
+    activeTaskSummaryRef.current = memory.summary;
+  }, [sessionId, getTaskMemory]);
+
+  const closeActiveStreamListener = () => {
+    if (unlistenRef.current) {
+      unlistenRef.current();
+      unlistenRef.current = null;
+    }
+  };
+
+  const normalizeCommandForLoopGuard = (command: string) => {
+    return command.replace(/\s+/g, ' ').trim();
+  };
+
+  const resetAutoCommandChain = () => {
+    autoCommandChainRef.current = {
+      commands: [],
+      count: 0,
+    };
+    autoFormatRepairAttemptsRef.current = 0;
+  };
+
+  const resetTaskMemory = (goal: string | null = null) => {
+    activeTaskGoalRef.current = goal;
+    const summary = goal ? `当前任务目标：${goal}` : '';
+    activeTaskSummaryRef.current = summary;
+    setTaskMemory(sessionId, { goal, summary });
+  };
+
+  const getLatestUserGoalBeforeMessage = (messageId?: string) => {
+    const sessionMessages = getMessages(sessionId);
+    const endIndex = messageId
+      ? sessionMessages.findIndex((message) => message.id === messageId)
+      : sessionMessages.length;
+    const searchEndIndex = endIndex >= 0 ? endIndex : sessionMessages.length;
+
+    for (let index = searchEndIndex - 1; index >= 0; index -= 1) {
+      const message = sessionMessages[index];
+      if (message.role === 'user' && message.content.trim()) {
+        return message.content.trim();
+      }
+    }
+
+    return null;
+  };
+
+  const registerAutoCommand = (command: string) => {
+    const normalizedCommand = normalizeCommandForLoopGuard(command);
+    const chain = autoCommandChainRef.current;
+
+    if (chain.commands.includes(normalizedCommand)) {
+      return {
+        allowed: false,
+        reason: `检测到 AI 重复建议同一条命令，已停止自动执行以避免循环：${command}`,
+      };
+    }
+
+    if (chain.count >= MAX_AUTO_CHAIN_COMMANDS) {
+      return {
+        allowed: false,
+        reason: `本轮任务已连续自动执行 ${MAX_AUTO_CHAIN_COMMANDS} 条命令，已暂停以避免循环。`,
+      };
+    }
+
+    chain.commands.push(normalizedCommand);
+    chain.count += 1;
+    return { allowed: true };
+  };
+
+  const persistTaskMemory = () => {
+    setTaskMemory(sessionId, {
+      goal: activeTaskGoalRef.current,
+      summary: activeTaskSummaryRef.current,
+    });
+  };
+
+  const compressTaskSummaryIfNeeded = async () => {
+    const summarySnapshot = activeTaskSummaryRef.current.trim();
+    if (
+      summaryCompressionInFlightRef.current ||
+      summarySnapshot.length <= TASK_SUMMARY_COMPRESS_THRESHOLD
+    ) {
+      return;
+    }
+
+    const activeProvider = await ensureActiveProvider();
+    if (!activeProvider) return;
+
+    summaryCompressionInFlightRef.current = true;
+
+    try {
+      const result = await invoke<AiChatResponse>('ai_chat', {
+        providerId: activeProvider.id,
+        sessionId,
+        history: [],
+        message: [
+          '请将下面的 AI 终端任务记忆压缩成结构化摘要，供后续多轮 SSH 排查继续使用。',
+          `目标长度：${TASK_SUMMARY_TARGET_LENGTH} 字以内；如果确实有必要，可以略微超过，但不要丢失关键事实。`,
+          '必须保留：用户原始目标、已经确认的事实、账号/密码/路径/服务名、成功命令、失败命令和原因、下一步待办。',
+          '必须合并：重复命令、重复输出、同一服务的多次检查结果。',
+          '删除：无关日志、冗余解释、完整长输出，只保留结论和必要片段。',
+          '请按以下结构输出：',
+          '## 任务目标',
+          '## 已确认事实',
+          '## 已获取的关键信息',
+          '## 已执行命令与结果',
+          '## 失败或无效尝试',
+          '## 下一步',
+          '只输出摘要正文，不要输出 JSON command，不要建议新命令。',
+          '',
+          '待压缩任务记忆：',
+          '```',
+          summarySnapshot,
+          '```',
+        ].join('\n'),
+      });
+
+      const compressedSummary = result.content.trim();
+      if (!compressedSummary) return;
+
+      const currentSummary = activeTaskSummaryRef.current;
+      if (currentSummary === summarySnapshot) {
+        activeTaskSummaryRef.current = compressedSummary;
+      } else if (currentSummary.startsWith(summarySnapshot)) {
+        const delta = currentSummary.slice(summarySnapshot.length).trim();
+        activeTaskSummaryRef.current = delta
+          ? `${compressedSummary}\n\n${delta}`
+          : compressedSummary;
+      } else {
+        activeTaskSummaryRef.current = compressedSummary;
+      }
+
+      persistTaskMemory();
+    } catch (err) {
+      console.warn('[AiChatPanel] 压缩任务摘要失败，保留未压缩摘要:', err);
+      if (activeTaskSummaryRef.current.length > TASK_SUMMARY_EMERGENCY_LIMIT) {
+        activeTaskSummaryRef.current = [
+          '## 摘要压缩暂时失败',
+          '下面是最近的任务记忆片段。再次收到命令结果后会继续尝试 AI 压缩。',
+          '',
+          activeTaskSummaryRef.current.slice(-TASK_SUMMARY_EMERGENCY_LIMIT),
+        ].join('\n');
+        persistTaskMemory();
+      }
+    } finally {
+      summaryCompressionInFlightRef.current = false;
+    }
+  };
+
+  const appendTaskSummary = (entry: string) => {
+    const normalizedEntry = entry.replace(/\n{3,}/g, '\n\n').trim();
+    if (!normalizedEntry) return;
+
+    const currentSummary = activeTaskSummaryRef.current.trim();
+    const nextSummary = currentSummary
+      ? `${currentSummary}\n\n${normalizedEntry}`
+      : normalizedEntry;
+
+    activeTaskSummaryRef.current = nextSummary;
+    persistTaskMemory();
+    void compressTaskSummaryIfNeeded();
+  };
+
+  const executeAutoCommand = (command: string, messageId: string) => {
+    const result = registerAutoCommand(command);
+
+    if (!result.allowed) {
+      addMessage(sessionId, {
+        role: 'system',
+        content: result.reason || '已暂停自动执行。',
+      });
+      return;
+    }
+
+    executeCommandAndWaitForOutput(command, messageId);
+  };
   
   // 终端输出管理
   const { 
@@ -170,6 +378,15 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     return `${contextLines.join('\n')}\n\n用户问题：${userMessage}`;
   };
 
+  const isThinkOnlyOrEmptyResponse = (content: string) => {
+    const withoutThinkBlocks = content
+      .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '')
+      .replace(/<\/?think\b[^>]*>/gi, '')
+      .trim();
+
+    return withoutThinkBlocks.length === 0;
+  };
+
   // 自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -204,6 +421,8 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
       role: 'user',
       content: trimmedInput,
     });
+    resetAutoCommandChain();
+    resetTaskMemory(trimmedInput);
     setInput('');
     setLoading(sessionId, true);
 
@@ -219,14 +438,27 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     let fullContent = '';
 
     try {
-      // 获取历史消息（排除刚添加的空消息）
-      const history = allMessages.slice(0, -1).map(m => ({
+      // 获取历史消息（排除刚添加的用户消息和空 assistant 占位，当前用户消息通过 message 单独发送）
+      const history = allMessages.slice(0, -2).map(m => ({
         role: m.role === 'system' ? 'user' : m.role,
         content: m.content
       }));
 
+      closeActiveStreamListener();
+
+      let localUnlisten: UnlistenFn | null = null;
+      const closeLocalStreamListener = () => {
+        if (localUnlisten) {
+          localUnlisten();
+          if (unlistenRef.current === localUnlisten) {
+            unlistenRef.current = null;
+          }
+          localUnlisten = null;
+        }
+      };
+
       // 设置事件监听
-      const unlisten = await listen<StreamEvent>(`ai-stream-${sessionId}`, (event) => {
+      localUnlisten = await listen<StreamEvent>(`ai-stream-${sessionId}`, (event) => {
         const data = event.payload;
         
         if (data.error) {
@@ -235,6 +467,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
             content: `❌ ${data.error}`,
           });
           setLoading(sessionId, false);
+          closeLocalStreamListener();
           return;
         }
         
@@ -247,6 +480,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
         }
         
         if (data.done) {
+          closeLocalStreamListener();
           // 流结束，处理命令
           updateMessage(sessionId, assistantMessageId, {
             content: fullContent,
@@ -257,13 +491,14 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
           
           // 自动模式下执行命令
           if (data.command && operationMode === 'auto') {
-            executeCommandAndWaitForOutput(data.command, assistantMessageId);
+            autoFormatRepairAttemptsRef.current = 0;
+            executeAutoCommand(data.command, assistantMessageId);
           }
         }
       });
 
       // 保存 unlisten 引用，用于停止时取消
-      unlistenRef.current = unlisten;
+      unlistenRef.current = localUnlisten;
 
       // 调用流式 API
       await invoke('ai_chat_stream', {
@@ -279,13 +514,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
       });
       setLoading(sessionId, false);
     } finally {
-      // 清理事件监听（延迟一下确保最后的事件被处理）
-      setTimeout(() => {
-        if (unlistenRef.current) {
-          unlistenRef.current();
-          unlistenRef.current = null;
-        }
-      }, 1000);
+      closeActiveStreamListener();
     }
   };
 
@@ -349,6 +578,14 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
         output = getOutput(sessionId);
         parsed = parseInstrumentedCommandOutput(output, markerId, command);
 
+        if (!parsed.completed && Date.now() - startTime >= PROMPT_COMPLETION_GRACE_MS && detectNewPromptLine(output)) {
+          parsed = {
+            ...parsed,
+            completed: true,
+          };
+          console.warn('[AI] 未检测到命令完成标记，但终端已回到提示符，按完成处理:', command);
+        }
+
         if (parsed.completed) {
           console.log('[AI] 检测到命令完成标记:', {
             command,
@@ -391,23 +628,34 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
       return;
     }
 
-    const commandStatus = parsed.exitCode === 0 ? 'completed' : 'failed';
+    const commandStatus = parsed.exitCode === undefined || parsed.exitCode === 0 ? 'completed' : 'failed';
     if (targetMessageId) {
       updateMessage(sessionId, targetMessageId, { commandStatus });
     }
 
     console.log('[AI] 命令执行完成，输出长度:', parsed.output.length, '耗时:', Date.now() - startTime, 'ms');
 
-    if (parsed.output.trim() || parsed.exitCode !== 0) {
+    if (parsed.output.trim() || parsed.exitCode !== 0 || operationMode === 'auto') {
       await sendOutputToAI(command, parsed.output, parsed.exitCode);
     }
   };
 
   
   // 发送命令输出给 AI 分析（流式）
-  const sendOutputToAI = async (command: string, output: string, exitCode?: number) => {
+  const sendOutputToAI = async (
+    command: string,
+    output: string,
+    exitCode?: number,
+    repairAttempt = 0
+  ) => {
     const activeProvider = await ensureActiveProvider();
     if (!activeProvider) return;
+
+    const taskGoal = activeTaskGoalRef.current || getLatestUserGoalBeforeMessage();
+    if (taskGoal && !activeTaskGoalRef.current) {
+      resetTaskMemory(taskGoal);
+    }
+    const taskSummary = activeTaskSummaryRef.current.trim();
 
     setLoading(sessionId, true);
 
@@ -425,7 +673,16 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     const allMessages = getMessages(sessionId);
     const assistantMessageId = allMessages[allMessages.length - 1].id;
     let fullContent = '';
-    let unlisten: UnlistenFn | null = null;
+    let localUnlisten: UnlistenFn | null = null;
+    const closeLocalStreamListener = () => {
+      if (localUnlisten) {
+        localUnlisten();
+        if (unlistenRef.current === localUnlisten) {
+          unlistenRef.current = null;
+        }
+        localUnlisten = null;
+      }
+    };
 
     try {
       // 获取历史消息（排除刚添加的空消息）
@@ -434,8 +691,10 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
         content: m.content
       }));
 
+      closeActiveStreamListener();
+
       // 设置事件监听
-      unlisten = await listen<StreamEvent>(`ai-stream-${sessionId}`, (event) => {
+      localUnlisten = await listen<StreamEvent>(`ai-stream-${sessionId}`, (event) => {
         const data = event.payload;
         
         if (data.error) {
@@ -443,6 +702,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
             content: `❌ ${data.error}`,
           });
           setLoading(sessionId, false);
+          closeLocalStreamListener();
           return;
         }
 
@@ -454,6 +714,32 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
         }
 
         if (data.done) {
+          closeLocalStreamListener();
+          if (
+            !data.command &&
+            operationMode === 'auto' &&
+            repairAttempt < MAX_AUTO_FORMAT_REPAIR_ATTEMPTS &&
+            isThinkOnlyOrEmptyResponse(fullContent)
+          ) {
+            autoFormatRepairAttemptsRef.current += 1;
+            updateMessage(sessionId, assistantMessageId, {
+              content: '模型只返回了空白或 think 标签残片，正在重试获取下一步命令...',
+            });
+            setLoading(sessionId, false);
+            void sendOutputToAI(command, output, exitCode, repairAttempt + 1);
+            return;
+          }
+
+          const outputSummary = output.trim()
+            ? output.slice(-COMMAND_OUTPUT_SUMMARY_TAIL_LENGTH)
+            : '(命令无输出)';
+          appendTaskSummary([
+            `命令：${command}`,
+            `退出码：${exitCode ?? '未知'}`,
+            `关键输出：${outputSummary}`,
+            `AI 分析：${fullContent.trim() || '(无分析)'}`,
+          ].join('\n'));
+
           updateMessage(sessionId, assistantMessageId, {
             content: fullContent,
             command: data.command,
@@ -461,17 +747,40 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
           });
           setLoading(sessionId, false);
 
-          // 自动执行新命令
           if (data.command && operationMode === 'auto') {
-            executeCommandAndWaitForOutput(data.command, assistantMessageId);
+            autoFormatRepairAttemptsRef.current = 0;
+            executeAutoCommand(data.command, assistantMessageId);
           }
         }
       });
 
+      unlistenRef.current = localUnlisten;
+
+      const analysisPrompt = repairAttempt > 0
+        ? [
+            '上一次模型响应只包含空白或 think 标签残片，没有返回可执行的 JSON command，导致自动模式无法继续。',
+            '请重新基于下面的任务目标、滚动摘要和命令结果判断下一步。',
+            '如果任务未完成，必须只在回复末尾给一个 JSON 代码块：',
+            '```json',
+            '{"command":"下一条只读排查命令"}',
+            '```',
+            '如果任务已经完成，请明确总结最终结论，不要输出 command。',
+            '',
+            `当前任务目标：${taskGoal || '未明确'}`,
+            '',
+            `当前任务滚动摘要：\n${taskSummary || '(暂无)'}`,
+            '',
+            `命令 "${command}" 已完成，退出码：${exitCode ?? '未知'}。执行结果如下：`,
+            '```',
+            truncatedOutput || '(命令无输出)',
+            '```',
+          ].join('\n')
+        : `当前任务目标：${taskGoal || '未明确'}\n\n当前任务滚动摘要：\n${taskSummary || '(暂无)'}\n\n命令 "${command}" 已完成，退出码：${exitCode ?? '未知'}。执行结果如下。请围绕当前任务目标和滚动摘要分析结果；如果还没有完成该目标，请按系统规则给下一条最相关的 JSON command；如果已经能完成该目标，请直接总结最终结果，不要给 command。\n\n\`\`\`\n${truncatedOutput || '(命令无输出)'}\n\`\`\``;
+
       // 调用流式 API
       await invoke('ai_chat_stream', {
         providerId: activeProvider.id,
-        message: `命令 "${command}" 已完成，退出码：${exitCode ?? '未知'}。执行结果如下，请分析并告诉我关键信息：\n\n\`\`\`\n${truncatedOutput || '(命令无输出)'}\n\`\`\``,
+        message: analysisPrompt,
         sessionId,
         history,
       });
@@ -482,15 +791,15 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
       });
       setLoading(sessionId, false);
     } finally {
-      setTimeout(() => {
-        unlisten?.();
-      }, 1000);
+      closeLocalStreamListener();
     }
   };
 
   // 处理命令执行（确认模式）
   const handleExecuteCommand = async (message: ChatMessage) => {
     if (!message.command) return;
+    resetAutoCommandChain();
+    resetTaskMemory(getLatestUserGoalBeforeMessage(message.id));
     await executeCommandAndWaitForOutput(message.command, message.id);
   };
 
@@ -519,15 +828,14 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     }
 
     // 取消事件监听
-    if (unlistenRef.current) {
-      unlistenRef.current();
-      unlistenRef.current = null;
-    }
+    closeActiveStreamListener();
     // 重置加载状态
     setLoading(sessionId, false);
     setWaitingForOutput(sessionId, false);
     // 清除待执行的命令
     clearPendingCommand(sessionId);
+    resetAutoCommandChain();
+    resetTaskMemory(null);
     console.log('[AI] 用户停止了当前对话');
   };
 
@@ -615,7 +923,6 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
             <MessageBubble
               key={message.id}
               message={message}
-              operationMode={operationMode}
               onExecute={() => handleExecuteCommand(message)}
               onReject={() => handleRejectCommand(message)}
             />
@@ -679,12 +986,11 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
 // 消息气泡组件
 interface MessageBubbleProps {
   message: ChatMessage;
-  operationMode: 'confirm' | 'auto';
   onExecute: () => void;
   onReject: () => void;
 }
 
-function MessageBubble({ message, operationMode, onExecute, onReject }: MessageBubbleProps) {
+function MessageBubble({ message, onExecute, onReject }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
   
@@ -801,7 +1107,7 @@ function MessageBubble({ message, operationMode, onExecute, onReject }: MessageB
             </div>
             
             {/* 确认模式下显示操作按钮 */}
-            {message.commandStatus === 'pending' && operationMode === 'confirm' && (
+            {message.commandStatus === 'pending' && (
               <div className="flex gap-2">
                 <button
                   onClick={onExecute}

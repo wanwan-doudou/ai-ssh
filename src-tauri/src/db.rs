@@ -6,7 +6,7 @@ use std::path::Path;
 /// 初始化数据库
 pub fn init_database(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
-    
+
     // 创建服务器表
     conn.execute(
         "CREATE TABLE IF NOT EXISTS servers (
@@ -47,7 +47,7 @@ pub fn init_database(path: &Path) -> Result<Connection> {
             [],
         )?;
     }
-    
+
     // 创建 providers 表
     conn.execute(
         "CREATE TABLE IF NOT EXISTS providers (
@@ -57,12 +57,34 @@ pub fn init_database(path: &Path) -> Result<Connection> {
             api_key TEXT NOT NULL,
             base_url TEXT,
             model TEXT,
+            context_window_tokens INTEGER,
             is_active INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         )",
         [],
     )?;
-    
+
+    let has_context_window_tokens = {
+        let mut stmt = conn.prepare("PRAGMA table_info(providers)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let column_name: String = row.get(1)?;
+            if column_name == "context_window_tokens" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+
+    if !has_context_window_tokens {
+        conn.execute(
+            "ALTER TABLE providers ADD COLUMN context_window_tokens INTEGER",
+            [],
+        )?;
+    }
+
     Ok(conn)
 }

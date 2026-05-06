@@ -13,29 +13,33 @@ use tauri::State;
 #[tauri::command]
 pub fn get_providers(state: State<AppState>) -> Result<Vec<Provider>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    
+
     let mut stmt = conn
-        .prepare("SELECT id, name, provider_type, api_key, base_url, model, is_active, created_at, updated_at FROM providers ORDER BY created_at DESC")
+        .prepare("SELECT id, name, provider_type, api_key, base_url, model, context_window_tokens, is_active, created_at, updated_at FROM providers ORDER BY created_at DESC")
         .map_err(|e| e.to_string())?;
-    
+
     let providers = stmt
         .query_map([], |row| {
             Ok(Provider {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                provider_type: row.get::<_, String>(2)?.parse().unwrap_or(ProviderType::Custom),
+                provider_type: row
+                    .get::<_, String>(2)?
+                    .parse()
+                    .unwrap_or(ProviderType::Custom),
                 api_key: row.get(3)?,
                 base_url: row.get(4)?,
                 model: row.get(5)?,
-                is_active: row.get::<_, i64>(6)? != 0,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                context_window_tokens: row.get(6)?,
+                is_active: row.get::<_, i64>(7)? != 0,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    
+
     Ok(providers)
 }
 
@@ -48,24 +52,26 @@ pub fn add_provider(
     api_key: String,
     base_url: Option<String>,
     model: Option<String>,
+    context_window_tokens: Option<i64>,
 ) -> Result<Provider, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    
+
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp_millis();
     let provider_type_enum: ProviderType = provider_type.parse().map_err(|e: String| e)?;
-    
+    let context_window_tokens = normalize_context_window_tokens(context_window_tokens)?;
+
     // 检查是否是第一个 provider，如果是则默认激活
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
     let is_active = count == 0;
-    
+
     conn.execute(
-        "INSERT INTO providers (id, name, provider_type, api_key, base_url, model, is_active, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![id, name, provider_type_enum.to_string(), api_key, base_url, model, is_active as i64, now, now],
+        "INSERT INTO providers (id, name, provider_type, api_key, base_url, model, context_window_tokens, is_active, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![id, name, provider_type_enum.to_string(), api_key, base_url, model, context_window_tokens, is_active as i64, now, now],
     ).map_err(|e| e.to_string())?;
-    
+
     Ok(Provider {
         id,
         name,
@@ -73,6 +79,7 @@ pub fn add_provider(
         api_key,
         base_url,
         model,
+        context_window_tokens,
         is_active,
         created_at: now,
         updated_at: now,
@@ -89,16 +96,18 @@ pub fn update_provider(
     api_key: String,
     base_url: Option<String>,
     model: Option<String>,
+    context_window_tokens: Option<i64>,
 ) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp_millis();
     let provider_type_enum: ProviderType = provider_type.parse().map_err(|e: String| e)?;
-    
+    let context_window_tokens = normalize_context_window_tokens(context_window_tokens)?;
+
     conn.execute(
-        "UPDATE providers SET name = ?1, provider_type = ?2, api_key = ?3, base_url = ?4, model = ?5, updated_at = ?6 WHERE id = ?7",
-        params![name, provider_type_enum.to_string(), api_key, base_url, model, now, id],
+        "UPDATE providers SET name = ?1, provider_type = ?2, api_key = ?3, base_url = ?4, model = ?5, context_window_tokens = ?6, updated_at = ?7 WHERE id = ?8",
+        params![name, provider_type_enum.to_string(), api_key, base_url, model, context_window_tokens, now, id],
     ).map_err(|e| e.to_string())?;
-    
+
     Ok(())
 }
 
@@ -106,10 +115,10 @@ pub fn update_provider(
 #[tauri::command]
 pub fn delete_provider(state: State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    
+
     conn.execute("DELETE FROM providers WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
-    
+
     Ok(())
 }
 
@@ -117,15 +126,18 @@ pub fn delete_provider(state: State<AppState>, id: String) -> Result<(), String>
 #[tauri::command]
 pub fn set_active_provider(state: State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    
+
     // 先将所有 provider 设为非激活
     conn.execute("UPDATE providers SET is_active = 0", [])
         .map_err(|e| e.to_string())?;
-    
+
     // 再将指定的 provider 设为激活
-    conn.execute("UPDATE providers SET is_active = 1 WHERE id = ?1", params![id])
-        .map_err(|e| e.to_string())?;
-    
+    conn.execute(
+        "UPDATE providers SET is_active = 1 WHERE id = ?1",
+        params![id],
+    )
+    .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
@@ -148,13 +160,13 @@ pub async fn test_provider_connection(
     model: Option<String>,
 ) -> Result<TestConnectionResult, String> {
     use std::time::Instant;
-    
+
     let start = Instant::now();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
-    
+
     // 根据 provider 类型选择测试端点
     let result = match provider_type.to_lowercase().as_str() {
         "claude" => test_claude(&client, &api_key, base_url).await,
@@ -170,9 +182,9 @@ pub async fn test_provider_connection(
         }
         _ => Err(format!("不支持的 Provider 类型: {}", provider_type)),
     };
-    
+
     let latency = start.elapsed().as_millis() as u64;
-    
+
     match result {
         Ok(msg) => Ok(TestConnectionResult {
             success: true,
@@ -194,7 +206,7 @@ async fn test_claude(
     base_url: Option<String>,
 ) -> Result<String, String> {
     let endpoint = anthropic_messages_url(base_url.as_deref());
-    
+
     // 发送最小化的测试请求
     let response = client
         .post(&endpoint)
@@ -209,7 +221,7 @@ async fn test_claude(
         .send()
         .await
         .map_err(|e| format!("网络请求失败: {}", e))?;
-    
+
     let status = response.status();
     if status.is_success() {
         Ok("Claude API 连接成功".to_string())
@@ -244,14 +256,14 @@ async fn test_openai(
 
     // 使用 models 端点测试，不消耗 tokens
     let endpoint = openai_models_url(base_url.as_deref());
-    
+
     let response = client
         .get(&endpoint)
         .header("Authorization", format!("Bearer {}", api_key))
         .send()
         .await
         .map_err(|e| format!("网络请求失败: {}", e))?;
-    
+
     let status = response.status();
     if status.is_success() {
         Ok("OpenAI API 连接成功".to_string())
@@ -273,14 +285,14 @@ async fn test_gemini(
 ) -> Result<String, String> {
     // 使用 models 列表端点测试
     let endpoint = gemini_models_url(base_url.as_deref());
-    
+
     let response = client
         .get(&endpoint)
         .header("x-goog-api-key", api_key)
         .send()
         .await
         .map_err(|e| format!("网络请求失败: {}", e))?;
-    
+
     let status = response.status();
     if status.is_success() {
         Ok("Gemini API 连接成功".to_string())
@@ -289,6 +301,14 @@ async fn test_gemini(
     } else {
         let body = response.text().await.unwrap_or_default();
         Err(format!("请求失败 ({}): {}", status, body))
+    }
+}
+
+fn normalize_context_window_tokens(value: Option<i64>) -> Result<Option<i64>, String> {
+    match value {
+        Some(tokens) if tokens <= 0 => Err("上下文窗口 tokens 必须大于 0".to_string()),
+        Some(tokens) => Ok(Some(tokens)),
+        None => Ok(None),
     }
 }
 
@@ -312,11 +332,7 @@ async fn test_deepseek(
     }
 
     // 使用 models 端点测试，不消耗 tokens
-    let endpoint = openai_compatible_url(
-        base_url.as_deref(),
-        DEFAULT_DEEPSEEK_BASE_URL,
-        "models",
-    );
+    let endpoint = openai_compatible_url(base_url.as_deref(), DEFAULT_DEEPSEEK_BASE_URL, "models");
 
     let response = client
         .get(&endpoint)
@@ -359,14 +375,14 @@ async fn test_custom(
 
     // 尝试 OpenAI 兼容的 models 端点
     let endpoint = openai_compatible_url(Some(base_url), base_url, "models");
-    
+
     let response = client
         .get(&endpoint)
         .header("Authorization", format!("Bearer {}", api_key))
         .send()
         .await
         .map_err(|e| format!("网络请求失败: {}", e))?;
-    
+
     let status = response.status();
     if status.is_success() {
         Ok("自定义 API 连接成功".to_string())
