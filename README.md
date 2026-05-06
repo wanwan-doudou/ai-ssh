@@ -72,6 +72,21 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
+### 发布 GitHub Release
+本项目已配置 GitHub Actions：推送 `v*` 标签后，会自动构建 Windows 和 macOS 安装包，并创建 Draft Release。
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+构建完成后，在 GitHub 仓库的 Releases 页面检查草稿发布，确认安装包无误后点击 Publish release。
+
+发布新版本前请同步更新以下版本号：
+- `package.json`
+- `src-tauri/Cargo.toml`
+- `src-tauri/tauri.conf.json`
+
 ## 📂 项目结构概览
 
 ```
