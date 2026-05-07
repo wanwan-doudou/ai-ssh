@@ -8,9 +8,10 @@
 //! - 写入操作通过 MPSC Channel 解耦，避免锁竞争
 
 use russh::client::{self, AuthResult};
+use russh::keys::ssh_key::{Algorithm, PrivateKey};
 use russh::keys::PrivateKeyWithHashAlg;
 use russh::{ChannelId, ChannelMsg, ChannelWriteHalf};
-use russh::keys::ssh_key::PrivateKey;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
@@ -18,7 +19,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
-use crate::models::{AuthType, DeviceType, Server};
+use crate::models::{AuthType, DeviceProfile, DeviceType, Server};
 
 /// SSH 客户端处理器
 /// 注意：数据接收现在通过 channel.wait() 实现，而不是 Handler 回调
@@ -77,6 +78,7 @@ struct SshSessionMeta {
     #[allow(dead_code)]
     server_name: String,
     device_type: DeviceType,
+    device_profile: DeviceProfile,
     session_data: Arc<Mutex<Option<SshSessionData>>>,
     write_tx: mpsc::UnboundedSender<String>,
 }
@@ -96,9 +98,9 @@ impl SshManager {
     /// 加载私钥文件
     fn load_private_key(path: &str, passphrase: Option<&str>) -> Result<PrivateKey, String> {
         let path = Path::new(path);
-        let key_data = std::fs::read_to_string(path)
-            .map_err(|e| format!("读取私钥文件失败: {:?}", e))?;
-        
+        let key_data =
+            std::fs::read_to_string(path).map_err(|e| format!("读取私钥文件失败: {:?}", e))?;
+
         if let Some(_pass) = passphrase {
             PrivateKey::from_openssh(key_data.as_bytes())
                 .map_err(|e| format!("解析私钥失败: {:?}", e))
@@ -116,6 +118,73 @@ impl SshManager {
         }
     }
 
+    fn legacy_compatible_preferred() -> russh::Preferred {
+        let mut preferred = russh::Preferred::default();
+
+        let mut kex = vec![
+            russh::kex::DH_G14_SHA1,
+            russh::kex::DH_G1_SHA1,
+            russh::kex::DH_GEX_SHA1,
+        ];
+        for algorithm in preferred.kex.iter().copied() {
+            if !kex.contains(&algorithm) {
+                kex.push(algorithm);
+            }
+        }
+
+        let mut cipher = preferred.cipher.iter().copied().collect::<Vec<_>>();
+        for algorithm in [
+            russh::cipher::AES_128_CBC,
+            russh::cipher::AES_192_CBC,
+            russh::cipher::AES_256_CBC,
+            russh::cipher::TRIPLE_DES_CBC,
+        ] {
+            if !cipher.contains(&algorithm) {
+                cipher.push(algorithm);
+            }
+        }
+
+        let mut key = vec![Algorithm::Rsa { hash: None }];
+        for algorithm in preferred.key.iter().cloned() {
+            if !key.contains(&algorithm) {
+                key.push(algorithm);
+            }
+        }
+        if !key.contains(&Algorithm::Dsa) {
+            key.push(Algorithm::Dsa);
+        }
+
+        preferred.kex = Cow::Owned(kex);
+        preferred.key = Cow::Owned(key);
+        preferred.cipher = Cow::Owned(cipher);
+        preferred
+    }
+
+    fn client_config(legacy_algorithms: bool, server_name: &str) -> client::Config {
+        let mut config = client::Config {
+            inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
+            ..Default::default()
+        };
+
+        if legacy_algorithms {
+            println!("[SSH] 已启用旧交换机兼容算法: server={}", server_name);
+            config.preferred = Self::legacy_compatible_preferred();
+        }
+
+        config
+    }
+
+    fn should_retry_with_legacy(error: &russh::Error) -> bool {
+        matches!(
+            error,
+            russh::Error::KexInit
+                | russh::Error::Kex
+                | russh::Error::UnknownAlgo
+                | russh::Error::NoCommonAlgo { .. }
+                | russh::Error::WrongServerSig
+        )
+    }
+
     /// 建立 SSH 连接
     pub async fn connect_async(
         &self,
@@ -123,27 +192,26 @@ impl SshManager {
         server: &Server,
         app_handle: AppHandle,
     ) -> Result<(), String> {
-        println!("[SSH] 开始连接 session_id={}, server={}", session_id, server.name);
+        println!(
+            "[SSH] 开始连接 session_id={}, server={}",
+            session_id, server.name
+        );
 
-        let config = client::Config {
-            inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
-            ..Default::default()
-        };
-        let config = Arc::new(config);
+        let config = Arc::new(Self::client_config(server.legacy_algorithms, &server.name));
 
         // 创建数据缓冲通道
         let (data_tx, mut data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        
+
         // 启动后台缓冲任务（极简版：50ms 间隔发射）
         let app_handle_clone = app_handle.clone();
         let session_id_clone = session_id.to_string();
-        
+
         tokio::spawn(async move {
             let mut buffer: Vec<u8> = Vec::with_capacity(64 * 1024);
             // 50ms 间隔，每秒约 20 次，足够流畅且减少 IPC 开销
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            
+
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -159,7 +227,7 @@ impl SshManager {
                         match recv_result {
                             Some(data) => {
                                 buffer.extend_from_slice(&data);
-                                
+
                                 // 缓冲超过 64KB 时立即发送
                                 if buffer.len() > 64 * 1024 {
                                     let text = String::from_utf8_lossy(&buffer).to_string();
@@ -183,46 +251,69 @@ impl SshManager {
             }
         });
 
-
-        // 创建客户端处理器
-        let handler = SshClientHandler {
-            session_id: session_id.to_string(),
-        };
-
         // 建立连接
         let addr = format!("{}:{}", server.host, server.port);
         println!("[SSH] 正在连接到 {}...", addr);
 
-        let mut session = client::connect(config, addr.clone(), handler)
-            .await
-            .map_err(|e| format!("SSH 连接失败 ({}): {:?}", addr, e))?;
+        let mut session = match client::connect(
+            config,
+            addr.clone(),
+            SshClientHandler {
+                session_id: session_id.to_string(),
+            },
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(error) if !server.legacy_algorithms && Self::should_retry_with_legacy(&error) => {
+                println!(
+                    "[SSH] 现代算法连接失败，自动切换旧设备兼容算法重试: server={}, error={:?}",
+                    server.name, error
+                );
+                client::connect(
+                    Arc::new(Self::client_config(true, &server.name)),
+                    addr.clone(),
+                    SshClientHandler {
+                        session_id: session_id.to_string(),
+                    },
+                )
+                .await
+                .map_err(|retry_error| {
+                    format!(
+                        "SSH 连接失败 ({}): {:?}; 兼容算法重试也失败: {:?}",
+                        addr, error, retry_error
+                    )
+                })?
+            }
+            Err(error) => return Err(format!("SSH 连接失败 ({}): {:?}", addr, error)),
+        };
 
         println!("[SSH] SSH 连接成功，正在认证...");
 
         // 认证
         let auth_result = match &server.auth_type {
             AuthType::Password => {
-                let password = server.password.as_ref()
-                    .ok_or("密码认证需要提供密码")?;
+                let password = server.password.as_ref().ok_or("密码认证需要提供密码")?;
                 session
                     .authenticate_password(&server.username, password)
                     .await
                     .map_err(|e| format!("密码认证失败: {:?}", e))?
             }
             AuthType::PrivateKey => {
-                let key_path = server.private_key_path.as_ref()
+                let key_path = server
+                    .private_key_path
+                    .as_ref()
                     .ok_or("密钥认证需要提供私钥路径")?;
-                
+
                 let private_key = Self::load_private_key(key_path, server.password.as_deref())?;
-                
-                let hash_alg = session.best_supported_rsa_hash().await
+
+                let hash_alg = session
+                    .best_supported_rsa_hash()
+                    .await
                     .map_err(|e| format!("获取 RSA 哈希算法失败: {:?}", e))?
                     .flatten();
-                
-                let key_with_hash = PrivateKeyWithHashAlg::new(
-                    Arc::new(private_key),
-                    hash_alg
-                );
+
+                let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(private_key), hash_alg);
 
                 session
                     .authenticate_publickey(&server.username, key_with_hash)
@@ -235,7 +326,9 @@ impl SshManager {
             AuthResult::Success => {
                 println!("[SSH] 认证成功，正在打开通道...");
             }
-            AuthResult::Failure { remaining_methods, .. } => {
+            AuthResult::Failure {
+                remaining_methods, ..
+            } => {
                 return Err(format!("认证失败，可用方法: {:?}", remaining_methods));
             }
         }
@@ -252,15 +345,7 @@ impl SshManager {
         println!("[SSH] 通道已打开，正在请求 PTY...");
 
         channel
-            .request_pty(
-                false,
-                "xterm-256color",
-                80,
-                24,
-                0,
-                0,
-                &[],
-            )
+            .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
             .await
             .map_err(|e| format!("请求 PTY 失败: {:?}", e))?;
 
@@ -292,7 +377,7 @@ impl SshManager {
                 if !*read_running.read().await {
                     break;
                 }
-                
+
                 // 等待 channel 消息 - 这是驱动 SSH 事件循环的关键！
                 match read_half.wait().await {
                     Some(msg) => {
@@ -321,11 +406,13 @@ impl SshManager {
                     }
                 }
             }
-            
-            // 通知前端连接已断开
-            let _ = app_handle_for_disconnect.emit(&format!("ssh-disconnected-{}", read_session_id), "连接已关闭");
-        });
 
+            // 通知前端连接已断开
+            let _ = app_handle_for_disconnect.emit(
+                &format!("ssh-disconnected-{}", read_session_id),
+                "连接已关闭",
+            );
+        });
 
         // === 写入任务：处理用户输入 ===
         let write_channel = shared_write_half.clone();
@@ -348,34 +435,37 @@ impl SshManager {
         let session_data = Arc::new(Mutex::new(Some(SshSessionData {
             write_half: shared_write_half,
             running: running.clone(),
-            session_handle: session_handle.clone(),  // 保存 session，防止被 drop
+            session_handle: session_handle.clone(), // 保存 session，防止被 drop
         })));
 
         {
             let mut sessions = self.sessions.lock().await;
-            sessions.insert(session_id.to_string(), SshSessionMeta {
-                server_name: server.name.clone(),
-                device_type: server.device_type.clone(),
-                session_data,
-                write_tx,
-            });
+            sessions.insert(
+                session_id.to_string(),
+                SshSessionMeta {
+                    server_name: server.name.clone(),
+                    device_type: server.device_type.clone(),
+                    device_profile: server.device_profile.clone(),
+                    session_data,
+                    write_tx,
+                },
+            );
         }
 
         Ok(())
     }
 
-
     /// 发送数据到 SSH 会话
     pub async fn write(&self, session_id: &str, data: &str) -> Result<(), String> {
         let sessions = self.sessions.lock().await;
-        
-        let session_meta = sessions.get(session_id)
-            .ok_or("会话不存在")?;
-        
-        session_meta.write_tx
+
+        let session_meta = sessions.get(session_id).ok_or("会话不存在")?;
+
+        session_meta
+            .write_tx
             .send(data.to_string())
             .map_err(|e| format!("发送数据失败: {:?}", e))?;
-        
+
         println!("[SSH] write 完成 session={}", session_id);
         Ok(())
     }
@@ -383,11 +473,27 @@ impl SshManager {
     /// 获取会话设备类型
     pub async fn session_device_type(&self, session_id: &str) -> Option<DeviceType> {
         let sessions = self.sessions.lock().await;
-        sessions.get(session_id).map(|meta| meta.device_type.clone())
+        sessions
+            .get(session_id)
+            .map(|meta| meta.device_type.clone())
+    }
+
+    /// 获取会话网络设备厂商 Profile
+    pub async fn session_device_profile(&self, session_id: &str) -> Option<DeviceProfile> {
+        let sessions = self.sessions.lock().await;
+        sessions
+            .get(session_id)
+            .map(|meta| meta.device_profile.clone())
     }
 
     /// 在现有 SSH 会话里执行一次性命令并返回输出
     pub async fn execute_command(&self, session_id: &str, command: &str) -> Result<String, String> {
+        const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+        const EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+        const FIRST_OUTPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+        const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
         let session_handle = {
             let sessions = self.sessions.lock().await;
             let session_meta = sessions.get(session_id).ok_or("会话不存在")?;
@@ -398,28 +504,63 @@ impl SshManager {
 
         let mut channel = {
             let handle = session_handle.lock().await;
-            handle
-                .channel_open_session()
+            tokio::time::timeout(OPEN_TIMEOUT, handle.channel_open_session())
                 .await
+                .map_err(|_| format!("打开命令通道超时: {}", command))?
                 .map_err(|e| format!("打开命令通道失败: {:?}", e))?
         };
 
-        channel
-            .exec(true, command)
+        tokio::time::timeout(EXEC_TIMEOUT, channel.exec(true, command))
             .await
+            .map_err(|_| format!("执行命令超时: {}", command))?
             .map_err(|e| format!("执行命令失败: {:?}", e))?;
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut exit_status: Option<u32> = None;
+        let deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
 
-        while let Some(msg) = channel.wait().await {
-            match msg {
-                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
-                ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
-                ChannelMsg::ExitStatus { exit_status: status } => exit_status = Some(status),
-                ChannelMsg::Eof | ChannelMsg::Close => {}
-                _ => {}
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), channel.close()).await;
+                if stdout.is_empty() && stderr.is_empty() {
+                    return Err(format!("命令执行超时: {}", command));
+                }
+                break;
+            }
+
+            let idle_timeout = if stdout.is_empty() && stderr.is_empty() {
+                FIRST_OUTPUT_TIMEOUT
+            } else {
+                IDLE_TIMEOUT
+            };
+            let wait_timeout = idle_timeout.min(deadline.saturating_duration_since(now));
+
+            match tokio::time::timeout(wait_timeout, channel.wait()).await {
+                Ok(Some(msg)) => match msg {
+                    ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+                    ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
+                    ChannelMsg::ExitStatus {
+                        exit_status: status,
+                    } => exit_status = Some(status),
+                    ChannelMsg::Close => break,
+                    ChannelMsg::Eof => {}
+                    _ => {}
+                },
+                Ok(None) => break,
+                Err(_) => {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        channel.close(),
+                    )
+                    .await;
+                    if stdout.is_empty() && stderr.is_empty() {
+                        return Err(format!("命令执行超时: {}", command));
+                    }
+                    break;
+                }
             }
         }
 
@@ -427,7 +568,11 @@ impl SshManager {
         let stderr_text = String::from_utf8_lossy(&stderr).trim().to_string();
         if let Some(status) = exit_status {
             if status != 0 {
-                let detail = if !stderr_text.is_empty() { stderr_text } else { stdout_text };
+                let detail = if !stderr_text.is_empty() {
+                    stderr_text
+                } else {
+                    stdout_text
+                };
                 return Err(format!("命令执行失败 (退出码 {}): {}", status, detail));
             }
         }
@@ -437,11 +582,18 @@ impl SshManager {
 
     /// 调整终端大小
     pub async fn resize(&self, session_id: &str, cols: u32, rows: u32) -> Result<(), String> {
+        if cols < 20 || rows < 5 {
+            println!(
+                "[SSH] 忽略异常终端大小 session={}, cols={}, rows={}",
+                session_id, cols, rows
+            );
+            return Ok(());
+        }
+
         let sessions = self.sessions.lock().await;
-        
-        let session_meta = sessions.get(session_id)
-            .ok_or("会话不存在")?;
-        
+
+        let session_meta = sessions.get(session_id).ok_or("会话不存在")?;
+
         let session_data = session_meta.session_data.lock().await;
         if let Some(ref data) = *session_data {
             let write_half = data.write_half.lock().await;
@@ -450,14 +602,14 @@ impl SshManager {
                 .await
                 .map_err(|e| format!("调整终端大小失败: {:?}", e))?;
         }
-        
+
         Ok(())
     }
 
     /// 断开 SSH 连接
     pub async fn disconnect(&self, session_id: &str) -> Result<(), String> {
         let mut sessions = self.sessions.lock().await;
-        
+
         if let Some(session_meta) = sessions.remove(session_id) {
             let mut session_data = session_meta.session_data.lock().await;
             if let Some(ref mut data) = *session_data {
@@ -466,7 +618,7 @@ impl SshManager {
                 let _ = write_half.eof().await;
             }
         }
-        
+
         Ok(())
     }
 }

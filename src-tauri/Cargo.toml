@@ -25,7 +25,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 # SSH 相关 (使用 russh - 纯 Rust 实现，支持现代加密算法)
 # 使用 ring 后端避免 aws-lc-sys 在 Windows 的编译问题
-russh = { version = "0.57", default-features = false, features = ["ring"] }
+russh = { version = "0.57", default-features = false, features = ["ring", "des", "rsa", "dsa"] }
 ssh-key = { version = "0.6", features = ["ed25519", "rsa", "crypto"] }
 russh-sftp = "2.1"
 async-trait = "0.1"

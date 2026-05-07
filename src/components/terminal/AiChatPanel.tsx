@@ -8,12 +8,15 @@ import {
   useTerminalOutputStore, 
   POLLING_INTERVAL,
   MAX_WAIT_TIME,
+  LONG_IDLE_THRESHOLD,
   MIN_EXECUTION_TIME,
   buildInstrumentedCommand,
   createCommandMarkerId,
   detectNewPromptLine,
+  detectNetworkPromptLine,
   detectInteractiveProgram,
   parseInstrumentedCommandOutput,
+  stripPlainCommandOutput,
 } from '@/stores/terminalOutputStore';
 import type { ChatMessage } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
@@ -30,6 +33,7 @@ interface StreamEvent {
 
 interface AiChatPanelProps {
   sessionId: string;
+  deviceType?: 'linux' | 'network';
   // 执行命令到终端的回调
   onExecuteCommand: (command: string, options?: { appendNewline?: boolean }) => void;
 }
@@ -43,6 +47,9 @@ const TASK_SUMMARY_COMPRESS_THRESHOLD = 16000;
 const TASK_SUMMARY_TARGET_LENGTH = 6000;
 const TASK_SUMMARY_EMERGENCY_LIMIT = 80000;
 const COMMAND_OUTPUT_SUMMARY_TAIL_LENGTH = 1600;
+const COMMAND_OUTPUT_CONTEXT_LIMIT = 600000;
+const NETWORK_PROMPT_FALLBACK_IDLE_MS = Math.max(30000, LONG_IDLE_THRESHOLD);
+const NETWORK_PAGER_ADVANCE_INTERVAL_MS = 800;
 
 interface AiChatResponse {
   content: string;
@@ -54,7 +61,35 @@ interface AutoCommandChain {
   count: number;
 }
 
-export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
+function buildCommandOutputContext(output: string) {
+  if (output.length <= COMMAND_OUTPUT_CONTEXT_LIMIT) {
+    return {
+      text: output,
+      truncated: false,
+    };
+  }
+
+  const headLength = Math.floor(COMMAND_OUTPUT_CONTEXT_LIMIT * 0.25);
+  const tailLength = COMMAND_OUTPUT_CONTEXT_LIMIT - headLength;
+  const omittedLength = output.length - headLength - tailLength;
+
+  return {
+    text: [
+      `[输出过长，以下只包含开头 ${headLength} 字符和结尾 ${tailLength} 字符，中间 ${omittedLength} 字符已省略。不要把省略部分当成无异常，也不要声称已经完整检查所有对象。]`,
+      '',
+      '[输出开头]',
+      output.slice(0, headLength),
+      '',
+      `[中间省略 ${omittedLength} 字符]`,
+      '',
+      '[输出结尾]',
+      output.slice(-tailLength),
+    ].join('\n'),
+    truncated: true,
+  };
+}
+
+export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand }: AiChatPanelProps) {
   const [input, setInput] = useState('');
   const [elapsedTick, setElapsedTick] = useState(Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -360,8 +395,9 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
 
     if (pending) {
       const elapsed = formatElapsed(Date.now() - pending.startTime);
+      const completionSignal = pending.markerId ? '完成标记' : '设备提示符';
       contextLines.push(
-        `当前命令仍在执行，尚未看到完成标记。命令：${pending.command}`,
+        `当前命令仍在执行，尚未看到${completionSignal}。命令：${pending.command}`,
         `已运行：${elapsed}`,
         '如果用户询问结果或进度，请明确说明命令还没有结束，不要把暂无输出判断为执行完成。'
       );
@@ -520,7 +556,8 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
 
   // 执行命令并持续监听输出，直到命令完成
   const executeCommandAndWaitForOutput = async (command: string, messageId?: string) => {
-    const markerId = createCommandMarkerId();
+    const shouldInstrumentCommand = deviceType !== 'network';
+    const markerId = shouldInstrumentCommand ? createCommandMarkerId() : '';
     const commandRun = {
       markerId,
       command,
@@ -545,12 +582,14 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     clearOutput(sessionId);
     
     // 记录等待的命令
-    setPendingCommand(sessionId, command, markerId);
+    setPendingCommand(sessionId, command, shouldInstrumentCommand ? markerId : undefined);
     
     console.log('[AI] 执行命令:', command);
     
-    // 执行带完成标记的命令，避免用输出静止时间误判长命令已结束
-    onExecuteCommand(buildInstrumentedCommand(command, markerId));
+    // Linux shell 用完成标记拿退出码；网络设备 CLI 不支持 printf/$?，只能发原始命令并等提示符返回。
+    onExecuteCommand(
+      shouldInstrumentCommand ? buildInstrumentedCommand(command, markerId) : command
+    );
     
     // 立即设置等待输出状态，给用户即时反馈
     setWaitingForOutput(sessionId, true);
@@ -562,8 +601,18 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
     }
     
     const startTime = Date.now();
+    let lastOutputLength = 0;
+    let lastOutputAt = startTime;
+    let lastPagerAdvanceAt = 0;
     let output = '';
-    let parsed = parseInstrumentedCommandOutput('', markerId, command);
+    let parsed = shouldInstrumentCommand
+      ? parseInstrumentedCommandOutput('', markerId, command)
+      : {
+          started: true,
+          completed: false,
+          exitCode: undefined,
+          output: '',
+        };
     let timedOut = false;
 
     await new Promise(resolve => setTimeout(resolve, MIN_EXECUTION_TIME));
@@ -576,14 +625,55 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
         }
 
         output = getOutput(sessionId);
-        parsed = parseInstrumentedCommandOutput(output, markerId, command);
+        if (output.length !== lastOutputLength) {
+          lastOutputLength = output.length;
+          lastOutputAt = Date.now();
+        }
 
-        if (!parsed.completed && Date.now() - startTime >= PROMPT_COMPLETION_GRACE_MS && detectNewPromptLine(output)) {
+        parsed = shouldInstrumentCommand
+          ? parseInstrumentedCommandOutput(output, markerId, command)
+          : {
+              started: true,
+              completed: false,
+              exitCode: undefined,
+              output: stripPlainCommandOutput(output, command),
+            };
+
+        if (!shouldInstrumentCommand) {
+          const interactiveKey = detectInteractiveProgram(output);
+          if (
+            interactiveKey === ' ' &&
+            Date.now() - lastPagerAdvanceAt >= NETWORK_PAGER_ADVANCE_INTERVAL_MS
+          ) {
+            lastPagerAdvanceAt = Date.now();
+            onExecuteCommand(interactiveKey, { appendNewline: false });
+          }
+        }
+
+        const promptCompleted = shouldInstrumentCommand
+          ? detectNewPromptLine(output)
+          : detectNetworkPromptLine(output) || detectNewPromptLine(output);
+
+        if (!parsed.completed && Date.now() - startTime >= PROMPT_COMPLETION_GRACE_MS && promptCompleted) {
           parsed = {
             ...parsed,
             completed: true,
           };
-          console.warn('[AI] 未检测到命令完成标记，但终端已回到提示符，按完成处理:', command);
+          console.warn('[AI] 终端已回到提示符，按完成处理:', command);
+        }
+
+        if (
+          !shouldInstrumentCommand &&
+          !parsed.completed &&
+          parsed.output.trim() &&
+          Date.now() - lastOutputAt >= NETWORK_PROMPT_FALLBACK_IDLE_MS &&
+          !detectInteractiveProgram(output)
+        ) {
+          parsed = {
+            ...parsed,
+            completed: true,
+          };
+          console.warn('[AI] 网络设备命令未检测到提示符，但输出已稳定，按完成处理:', command);
         }
 
         if (parsed.completed) {
@@ -659,10 +749,7 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
 
     setLoading(sessionId, true);
 
-    // 截取输出，避免过长
-    const truncatedOutput = output.length > 4000 
-      ? '... (前面输出过长已截断)\n' + output.slice(-4000)
-      : output;
+    const commandOutputContext = buildCommandOutputContext(output);
 
     // 先添加空消息
     addMessage(sessionId, {
@@ -756,6 +843,10 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
 
       unlistenRef.current = localUnlisten;
 
+      const truncatedOutputWarning = commandOutputContext.truncated
+        ? '注意：命令输出已因长度限制被省略中间部分。请明确说明只能基于可见片段分析；如果任务需要全量判断，不要直接下最终结论，应给出更精确的过滤命令或说明需要继续查看缺失部分。'
+        : '';
+
       const analysisPrompt = repairAttempt > 0
         ? [
             '上一次模型响应只包含空白或 think 标签残片，没有返回可执行的 JSON command，导致自动模式无法继续。',
@@ -770,12 +861,14 @@ export function AiChatPanel({ sessionId, onExecuteCommand }: AiChatPanelProps) {
             '',
             `当前任务滚动摘要：\n${taskSummary || '(暂无)'}`,
             '',
+            truncatedOutputWarning,
+            '',
             `命令 "${command}" 已完成，退出码：${exitCode ?? '未知'}。执行结果如下：`,
             '```',
-            truncatedOutput || '(命令无输出)',
+            commandOutputContext.text || '(命令无输出)',
             '```',
-          ].join('\n')
-        : `当前任务目标：${taskGoal || '未明确'}\n\n当前任务滚动摘要：\n${taskSummary || '(暂无)'}\n\n命令 "${command}" 已完成，退出码：${exitCode ?? '未知'}。执行结果如下。请围绕当前任务目标和滚动摘要分析结果；如果还没有完成该目标，请按系统规则给下一条最相关的 JSON command；如果已经能完成该目标，请直接总结最终结果，不要给 command。\n\n\`\`\`\n${truncatedOutput || '(命令无输出)'}\n\`\`\``;
+          ].filter(Boolean).join('\n')
+        : `当前任务目标：${taskGoal || '未明确'}\n\n当前任务滚动摘要：\n${taskSummary || '(暂无)'}\n\n${truncatedOutputWarning ? `${truncatedOutputWarning}\n\n` : ''}命令 "${command}" 已完成，退出码：${exitCode ?? '未知'}。执行结果如下。请围绕当前任务目标和滚动摘要分析结果；如果还没有完成该目标，请按系统规则给下一条最相关的 JSON command；如果已经能完成该目标，请直接总结最终结果，不要给 command。\n\n\`\`\`\n${commandOutputContext.text || '(命令无输出)'}\n\`\`\``;
 
       // 调用流式 API
       await invoke('ai_chat_stream', {

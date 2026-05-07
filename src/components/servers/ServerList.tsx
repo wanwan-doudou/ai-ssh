@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
-import { Plus, Search, Server, MoreVertical } from "lucide-react";
-import type { Server as ServerType } from "@/types";
+import { Plus, Search, Server, MoreVertical, Network, ShieldAlert } from "lucide-react";
+import type { DeviceProfile, Server as ServerType } from "@/types";
 import { ServerForm } from "./ServerForm";
 import { useServerStore } from "@/stores/serverStore";
 import { useTerminalStore } from "@/stores/terminalStore";
@@ -8,6 +8,15 @@ import { useTerminalStore } from "@/stores/terminalStore";
 interface ServerListProps {
   onNavigate: (view: "servers" | "providers" | "terminal") => void;
 }
+
+const DEVICE_PROFILE_LABELS: Record<DeviceProfile, string> = {
+  auto: "自动识别",
+  huawei: "华为",
+  h3c: "H3C",
+  cisco: "Cisco",
+  ruijie: "锐捷",
+  fortigate: "FortiGate",
+};
 
 export function ServerList({ onNavigate }: ServerListProps) {
   const [showForm, setShowForm] = useState(false);
@@ -137,7 +146,11 @@ function ServerCard({ server, onEdit, onConnect }: ServerCardProps) {
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-lg bg-primary-500/20 flex items-center justify-center">
-            <Server className="w-5 h-5 text-primary-600 dark:text-primary-400" />
+            {server.deviceType === "network" ? (
+              <Network className="w-5 h-5 text-primary-600 dark:text-primary-400" />
+            ) : (
+              <Server className="w-5 h-5 text-primary-600 dark:text-primary-400" />
+            )}
           </div>
           <div>
             <h3 className="font-medium text-surface-900 dark:text-white transition-colors">{server.name}</h3>
@@ -174,9 +187,17 @@ function ServerCard({ server, onEdit, onConnect }: ServerCardProps) {
       </div>
       
       <div className="mt-4 flex items-center justify-between">
-        <span className="text-xs text-surface-500">
-          {server.username}@{server.authType === "password" ? "密码" : "密钥"} · {server.deviceType === "network" ? "网络设备" : "Linux"}
-        </span>
+        <div className="min-w-0 text-xs text-surface-500">
+          <span>
+            {server.username}@{server.authType === "password" ? "密码" : "密钥"} · {server.deviceType === "network" ? DEVICE_PROFILE_LABELS[server.deviceProfile] : "Linux"}
+          </span>
+          {server.legacyAlgorithms && (
+            <span className="ml-2 inline-flex items-center gap-1 rounded-md bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+              <ShieldAlert className="h-3 w-3" />
+              兼容
+            </span>
+          )}
+        </div>
         <button 
           onClick={onConnect}
           className="btn-primary text-xs py-1 px-3"

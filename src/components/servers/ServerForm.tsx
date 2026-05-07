@@ -83,6 +83,8 @@ export function ServerForm({ server, onClose }: ServerFormProps) {
       username: formData.username,
       authType: formData.authType,
       deviceType: formData.deviceType,
+      deviceProfile: "auto",
+      legacyAlgorithms: formData.deviceType === "network",
       password: formData.authType === "password" ? formData.password : undefined,
       privateKeyPath: formData.authType === "privateKey" ? formData.privateKeyPath : undefined,
       group: formData.group || undefined,
@@ -105,7 +107,7 @@ export function ServerForm({ server, onClose }: ServerFormProps) {
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="glass-card w-full max-w-md mx-4 p-6 animate-in fade-in zoom-in-95 duration-200 bg-white dark:bg-surface-800 border-surface-200 dark:border-surface-700">
+      <div className="glass-card w-full max-w-md max-h-[90vh] overflow-y-auto mx-4 p-6 animate-in fade-in zoom-in-95 duration-200 bg-white dark:bg-surface-800 border-surface-200 dark:border-surface-700">
         {/* 头部 */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">

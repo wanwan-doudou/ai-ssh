@@ -19,6 +19,10 @@ pub struct Server {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub device_type: DeviceType,
+    #[serde(default)]
+    pub device_profile: DeviceProfile,
+    #[serde(default)]
+    pub legacy_algorithms: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -79,6 +83,53 @@ impl std::str::FromStr for DeviceType {
                 Ok(DeviceType::Network)
             }
             _ => Err(format!("未知的设备类型: {}", s)),
+        }
+    }
+}
+
+/// 网络设备厂商 Profile
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DeviceProfile {
+    Auto,
+    Huawei,
+    H3c,
+    Cisco,
+    Ruijie,
+    Fortigate,
+}
+
+impl Default for DeviceProfile {
+    fn default() -> Self {
+        DeviceProfile::Auto
+    }
+}
+
+impl std::fmt::Display for DeviceProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeviceProfile::Auto => write!(f, "auto"),
+            DeviceProfile::Huawei => write!(f, "huawei"),
+            DeviceProfile::H3c => write!(f, "h3c"),
+            DeviceProfile::Cisco => write!(f, "cisco"),
+            DeviceProfile::Ruijie => write!(f, "ruijie"),
+            DeviceProfile::Fortigate => write!(f, "fortigate"),
+        }
+    }
+}
+
+impl std::str::FromStr for DeviceProfile {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "" | "auto" | "unknown" | "generic" => Ok(DeviceProfile::Auto),
+            "huawei" | "vrp" => Ok(DeviceProfile::Huawei),
+            "h3c" | "comware" => Ok(DeviceProfile::H3c),
+            "cisco" | "ios" | "nxos" | "nx-os" => Ok(DeviceProfile::Cisco),
+            "ruijie" | "rgos" | "ruijie-networks" | "ruijie_networks" => Ok(DeviceProfile::Ruijie),
+            "fortigate" | "fortinet" | "fortios" => Ok(DeviceProfile::Fortigate),
+            _ => Err(format!("未知的设备厂商 Profile: {}", s)),
         }
     }
 }

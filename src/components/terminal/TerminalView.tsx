@@ -175,6 +175,8 @@ const DETAIL_REFRESH_MS = 2000;
 const FILESYSTEM_REFRESH_MS = 8000;
 
 type ServerDetailKind = "overview" | "processes" | "network" | "memory" | "disk";
+type DeviceType = "linux" | "network";
+type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
 
 interface ServerDetailTab {
   id: string;
@@ -284,14 +286,7 @@ export function TerminalView() {
     }
   }, [showSftpPanel]);
 
-  const handleCloseSession = async (sessionId: string) => {
-    // 调用后端断开连接
-    try {
-      await invoke("disconnect_ssh", { sessionId });
-    } catch (err) {
-      console.error("断开连接失败:", err);
-    }
-    
+  const handleCloseSession = (sessionId: string) => {
     setDetailTabs((prev) => prev.filter((tab) => tab.sessionId !== sessionId));
     setActiveDetailTabId((current) => {
       if (!current) return null;
@@ -299,6 +294,10 @@ export function TerminalView() {
       return activeTab?.sessionId === sessionId ? null : current;
     });
     removeSession(sessionId);
+
+    invoke("disconnect_ssh", { sessionId }).catch((err) => {
+      console.error("断开连接失败:", err);
+    });
   };
 
   // 引用 Chat Store
@@ -330,6 +329,11 @@ export function TerminalView() {
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
   const activeDetailTab = detailTabs.find((tab) => tab.id === activeDetailTabId) ?? null;
+  const activeServerConfig = activeSession
+    ? servers.find((server) => server.id === activeSession.serverId) ?? null
+    : null;
+  const activeDeviceType = activeServerConfig?.deviceType ?? "linux";
+  const activeIsNetworkDevice = activeDeviceType === "network";
 
   const fetchServerInfo = useCallback(async (sessionId: string, silent = false) => {
     if (refreshingSessionRef.current === sessionId) {
@@ -446,6 +450,11 @@ export function TerminalView() {
 
     setServerInfo(null);
     setServerInfoError(null);
+    if (activeIsNetworkDevice) {
+      setIsServerInfoLoading(false);
+      return;
+    }
+
     fetchServerInfo(activeSessionId, false);
 
     const timer = window.setInterval(() => {
@@ -455,10 +464,11 @@ export function TerminalView() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [activeSessionId, activeSession?.isConnected, fetchServerInfo]);
+  }, [activeSessionId, activeSession?.isConnected, activeIsNetworkDevice, fetchServerInfo]);
 
   // 侧边栏展开 或 详情标签为 overview/disk 时，获取文件系统数据
-  const needFilesystems = showServerInfoPanel || activeDetailTab?.kind === "overview" || activeDetailTab?.kind === "disk";
+  const needFilesystems = !activeIsNetworkDevice
+    && (showServerInfoPanel || activeDetailTab?.kind === "overview" || activeDetailTab?.kind === "disk");
   useEffect(() => {
     if (!activeSessionId || !activeSession?.isConnected || !needFilesystems) {
       return;
@@ -478,7 +488,7 @@ export function TerminalView() {
   }, [activeSessionId, activeSession?.isConnected, needFilesystems, fetchFilesystems]);
 
   useEffect(() => {
-    if (!activeSessionId || !activeSession?.isConnected || activeDetailTab?.kind !== "processes") {
+    if (!activeSessionId || !activeSession?.isConnected || activeIsNetworkDevice || activeDetailTab?.kind !== "processes") {
       return;
     }
 
@@ -493,10 +503,10 @@ export function TerminalView() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [activeSessionId, activeSession?.isConnected, activeDetailTab?.kind, fetchProcessList]);
+  }, [activeSessionId, activeSession?.isConnected, activeIsNetworkDevice, activeDetailTab?.kind, fetchProcessList]);
 
   useEffect(() => {
-    if (!activeSessionId || !activeSession?.isConnected || activeDetailTab?.kind !== "network") {
+    if (!activeSessionId || !activeSession?.isConnected || activeIsNetworkDevice || activeDetailTab?.kind !== "network") {
       return;
     }
 
@@ -511,7 +521,7 @@ export function TerminalView() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [activeSessionId, activeSession?.isConnected, activeDetailTab?.kind, fetchNetworkConnections]);
+  }, [activeSessionId, activeSession?.isConnected, activeIsNetworkDevice, activeDetailTab?.kind, fetchNetworkConnections]);
 
   const handleExecuteCommand = (command: string, options?: { appendNewline?: boolean }) => {
     if (!activeSessionId) return;
@@ -527,6 +537,7 @@ export function TerminalView() {
 
   const handleOpenServerDetail = useCallback((kind: ServerDetailKind) => {
     if (!activeSessionId) return;
+    if (activeIsNetworkDevice && kind !== "overview") return;
     const tabId = `detail-${activeSessionId}-${kind}`;
 
     setDetailTabs((prev) => {
@@ -538,7 +549,7 @@ export function TerminalView() {
 
     setActiveSessionId(activeSessionId);
     setActiveDetailTabId(tabId);
-  }, [activeSessionId, setActiveSessionId]);
+  }, [activeSessionId, activeIsNetworkDevice, setActiveSessionId]);
 
   const handleCloseDetailTab = useCallback((tabId: string) => {
     setDetailTabs((prev) => prev.filter((tab) => tab.id !== tabId));
@@ -547,6 +558,10 @@ export function TerminalView() {
 
   const handleRefreshDetail = useCallback(() => {
     if (!activeSession) return;
+
+    if (activeIsNetworkDevice) {
+      return;
+    }
 
     if (activeDetailTab?.kind === "overview") {
       fetchServerInfo(activeSession.id, false);
@@ -576,6 +591,7 @@ export function TerminalView() {
     }
   }, [
     activeSession,
+    activeIsNetworkDevice,
     activeDetailTab?.kind,
     fetchFilesystems,
     fetchNetworkConnections,
@@ -711,6 +727,7 @@ export function TerminalView() {
                 visible={showServerInfoPanel}
                 onToggle={() => setShowServerInfoPanel((prev) => !prev)}
                 session={activeSession}
+                deviceType={activeDeviceType}
                 info={serverInfo}
                 filesystems={filesystems}
                 isLoading={isServerInfoLoading}
@@ -724,6 +741,7 @@ export function TerminalView() {
                   <ServerDetailView
                     tab={activeDetailTab}
                     session={activeSession}
+                    deviceType={activeDeviceType}
                     info={serverInfo}
                     infoError={serverInfoError}
                     filesystems={filesystems}
@@ -830,6 +848,7 @@ export function TerminalView() {
           {activeSessionId ? (
             <AiChatPanel 
               sessionId={activeSessionId}
+              deviceType={activeDeviceType}
               onExecuteCommand={handleExecuteCommand}
             />
           ) : (
@@ -850,6 +869,7 @@ interface ServerInfoPanelProps {
   visible: boolean;
   onToggle: () => void;
   session: any | null;
+  deviceType: DeviceType;
   info: ServerRuntimeInfo | null;
   filesystems: ServerFilesystemInfo[];
   isLoading: boolean;
@@ -874,10 +894,23 @@ function isRealFilesystem(fs: ServerFilesystemInfo): boolean {
   return true;
 }
 
-function ServerInfoPanel({ visible, onToggle, session, info, filesystems, isLoading, error, onRefresh, onOpenDetail }: ServerInfoPanelProps) {
+function ServerInfoPanel({ visible, onToggle, session, deviceType, info, filesystems, isLoading, error, onRefresh, onOpenDetail }: ServerInfoPanelProps) {
   const isConnected = Boolean(session?.isConnected);
+  const isNetworkDevice = deviceType === "network";
   const memoryPercent = info && info.memoryTotalKb > 0
     ? (info.memoryUsedKb / info.memoryTotalKb) * 100
+    : 0;
+  const cpuBusyPercent = info
+    ? Math.max(0, Math.min(
+      info.cpuUserPercent
+        + info.cpuNicePercent
+        + info.cpuSystemPercent
+        + info.cpuIowaitPercent
+        + info.cpuIrqPercent
+        + info.cpuSoftirqPercent
+        + info.cpuStealPercent,
+      100
+    ))
     : 0;
   // 过滤出真实磁盘分区用于侧边栏展示
   const realFilesystems = filesystems.filter(isRealFilesystem);
@@ -902,7 +935,9 @@ function ServerInfoPanel({ visible, onToggle, session, info, filesystems, isLoad
       <div className="h-10 px-3 border-b border-surface-200 dark:border-surface-800 flex items-center justify-between">
         <div className="flex items-center gap-2 min-w-0">
           <Activity className="w-4 h-4 text-primary-600 dark:text-primary-400" />
-          <span className="text-xs font-semibold text-surface-700 dark:text-surface-200 truncate">服务器信息</span>
+          <span className="text-xs font-semibold text-surface-700 dark:text-surface-200 truncate">
+            {isNetworkDevice ? "网络设备信息" : "服务器信息"}
+          </span>
         </div>
         <div className="flex items-center gap-1">
           <button
@@ -935,16 +970,24 @@ function ServerInfoPanel({ visible, onToggle, session, info, filesystems, isLoad
         </div>
 
         {!session && (
-          <div className="text-xs text-surface-500 dark:text-surface-400">请选择一个会话查看服务器信息。</div>
+          <div className="text-xs text-surface-500 dark:text-surface-400">请选择一个会话查看设备信息。</div>
         )}
 
         {session && !isConnected && (
-          <div className="text-xs text-surface-500 dark:text-surface-400">连接成功后将自动展示主机运行信息。</div>
+          <div className="text-xs text-surface-500 dark:text-surface-400">
+            {isNetworkDevice ? "连接成功后即可在终端交互。" : "连接成功后将自动展示设备运行信息。"}
+          </div>
         )}
 
         {session && isConnected && error && !info && (
           <div className="rounded-lg border border-red-200 dark:border-red-900/40 bg-red-50 dark:bg-red-950/20 p-3 text-xs text-red-600 dark:text-red-300 break-words">
-            获取服务器信息失败: {error}
+            获取设备信息失败: {error}
+          </div>
+        )}
+
+        {session && isConnected && isNetworkDevice && !info && !error && (
+          <div className="rounded-lg border border-surface-200 dark:border-surface-800 bg-white/70 dark:bg-surface-950/40 p-3 text-xs leading-5 text-surface-600 dark:text-surface-300">
+            已连接。为避免部分交换机断开当前交互会话，网络设备信息不会自动采集。
           </div>
         )}
 
@@ -954,11 +997,11 @@ function ServerInfoPanel({ visible, onToggle, session, info, filesystems, isLoad
               type="button"
               onClick={() => onOpenDetail("overview")}
               className={detailCardClass}
-              title="查看系统信息详情"
+              title={isNetworkDevice ? "查看设备信息详情" : "查看系统信息详情"}
             >
               <div className="flex items-center gap-2 text-surface-700 dark:text-surface-200">
                 <Clock3 className="w-3.5 h-3.5" />
-                <span className="text-xs font-medium">系统信息</span>
+                <span className="text-xs font-medium">{isNetworkDevice ? "设备信息" : "系统信息"}</span>
               </div>
               <p className="text-xs text-surface-600 dark:text-surface-300 break-words">{info.os}</p>
               <p className="text-xs text-surface-500 dark:text-surface-400 break-words">
@@ -966,9 +1009,36 @@ function ServerInfoPanel({ visible, onToggle, session, info, filesystems, isLoad
               </p>
               <p className="text-xs text-surface-500 dark:text-surface-400 break-words">运行时间: {info.uptime}</p>
               <p className="text-xs text-surface-500 dark:text-surface-400 break-all">{info.host} / {info.ipAddress}</p>
-              <p className="text-[11px] text-primary-600 dark:text-primary-400">点击打开系统信息标签（约 3 秒刷新）</p>
+              <p className="text-[11px] text-primary-600 dark:text-primary-400">{isNetworkDevice ? "点击打开设备信息标签（约 3 秒刷新）" : "点击打开系统信息标签（约 3 秒刷新）"}</p>
             </button>
 
+            {isNetworkDevice ? (
+              <div className={detailCardClass}>
+                <div className="flex items-center gap-2 text-surface-700 dark:text-surface-200">
+                  <Network className="w-3.5 h-3.5" />
+                  <span className="text-xs font-medium">设备摘要</span>
+                </div>
+                <p className="text-xs text-surface-600 dark:text-surface-300 break-words">类型: 防火墙/交换机</p>
+                {info.deviceModel && (
+                  <p className="text-xs text-surface-500 dark:text-surface-400 break-words">型号: {info.deviceModel}</p>
+                )}
+                {info.serialNumber && (
+                  <p className="text-xs text-surface-500 dark:text-surface-400 break-words">序列号: {info.serialNumber}</p>
+                )}
+                {cpuBusyPercent > 0 && (
+                  <p className="text-xs text-surface-500 dark:text-surface-400">CPU: {formatPercent(cpuBusyPercent)}</p>
+                )}
+                {info.memoryTotalKb > 0 && (
+                  <p className="text-xs text-surface-500 dark:text-surface-400">内存: {formatPercent(memoryPercent)}</p>
+                )}
+                {info.temperature && (
+                  <p className="text-xs text-surface-500 dark:text-surface-400 break-words">温度: {info.temperature}</p>
+                )}
+                <p className="text-xs text-surface-500 dark:text-surface-400 break-all">管理地址: {info.ipAddress}</p>
+                <p className="text-xs text-surface-500 dark:text-surface-400 break-words">运行时间: {info.uptime}</p>
+              </div>
+            ) : (
+              <>
             <button
               type="button"
               onClick={() => onOpenDetail("processes")}
@@ -1078,6 +1148,8 @@ function ServerInfoPanel({ visible, onToggle, session, info, filesystems, isLoad
               <p className="text-xs text-surface-500 dark:text-surface-400">发送: {formatBytes(info.netTxBytes)}</p>
               <p className="text-[11px] text-primary-600 dark:text-primary-400">点击打开网络标签（约 2 秒刷新）</p>
             </button>
+              </>
+            )}
 
             <p className="text-[11px] text-surface-400 dark:text-surface-500">
               最后刷新: {new Date(info.collectedAt).toLocaleTimeString()}
@@ -1092,6 +1164,7 @@ function ServerInfoPanel({ visible, onToggle, session, info, filesystems, isLoad
 interface ServerDetailViewProps {
   tab: ServerDetailTab;
   session: any | null;
+  deviceType: DeviceType;
   info: ServerRuntimeInfo | null;
   infoError: string | null;
   filesystems: ServerFilesystemInfo[];
@@ -1108,6 +1181,7 @@ interface ServerDetailViewProps {
 function ServerDetailView({
   tab,
   session,
+  deviceType,
   info,
   infoError,
   filesystems,
@@ -1121,6 +1195,7 @@ function ServerDetailView({
   onBackToTerminal
 }: ServerDetailViewProps) {
   const isConnected = Boolean(session?.isConnected);
+  const isNetworkDevice = deviceType === "network";
   const memoryPercent = info && info.memoryTotalKb > 0
     ? (info.memoryUsedKb / info.memoryTotalKb) * 100
     : 0;
@@ -1158,6 +1233,7 @@ function ServerDetailView({
 
   const renderRuntimeSnapshotSection = () => {
     if (!info) return null;
+    if (isNetworkDevice) return null;
 
     return (
       <div className={sectionClass}>
@@ -1242,10 +1318,46 @@ function ServerDetailView({
     );
   };
 
+  const renderNetworkDeviceNotice = (title: string) => (
+    <div className={sectionClass}>
+      <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">{title}</h3>
+      <div className="text-sm text-surface-500 dark:text-surface-400">
+        网络设备不执行 Linux 资源探测，请在终端中使用 show/display 类命令查看对应信息。
+      </div>
+    </div>
+  );
+
   const renderDetailContent = () => {
     switch (tab.kind) {
       case "overview":
         if (!info) return null;
+        if (isNetworkDevice) {
+          return (
+            <div className={sectionClass}>
+              <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">设备概览</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <p className={valueClass}>设备名: {info.host}</p>
+                  <p className={valueClass}>管理 IP: {info.ipAddress}</p>
+                  <p className={valueClass}>设备类型: 防火墙/交换机</p>
+                  {info.deviceModel && <p className={valueClass}>型号: {info.deviceModel}</p>}
+                  {info.serialNumber && <p className={valueClass}>序列号: {info.serialNumber}</p>}
+                </div>
+                <div className="space-y-2">
+                  <p className={valueClass}>系统版本: {info.os}</p>
+                  <p className={valueClass}>系统标识: {info.kernel}</p>
+                  <p className={valueClass}>运行时间: {info.uptime}</p>
+                  {cpuBusyPercent > 0 && <p className={valueClass}>CPU: {formatPercent(cpuBusyPercent)}</p>}
+                  {info.memoryTotalKb > 0 && <p className={valueClass}>内存: {formatPercent(memoryPercent)}</p>}
+                  {info.temperature && <p className={valueClass}>温度: {info.temperature}</p>}
+                  {(info.netRxBytes > 0 || info.netTxBytes > 0) && (
+                    <p className={valueClass}>流量: 接收 {formatBytes(info.netRxBytes)} / 发送 {formatBytes(info.netTxBytes)}</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        }
         return (
           <>
             <div className={sectionClass}>
@@ -1314,6 +1426,7 @@ function ServerDetailView({
           </>
         );
       case "memory":
+        if (isNetworkDevice) return renderNetworkDeviceNotice("内存详情");
         if (!info) return null;
         return (
           <div className={sectionClass}>
@@ -1367,6 +1480,7 @@ function ServerDetailView({
           </div>
         );
       case "disk":
+        if (isNetworkDevice) return renderNetworkDeviceNotice("磁盘详情");
         if (!info) return null;
         return (
           <>
@@ -1445,6 +1559,7 @@ function ServerDetailView({
           </>
         );
       case "processes":
+        if (isNetworkDevice) return renderNetworkDeviceNotice("进程列表");
         return (
           <div className={sectionClass}>
             <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">进程列表</h3>
@@ -1486,6 +1601,7 @@ function ServerDetailView({
           </div>
         );
       case "network":
+        if (isNetworkDevice) return renderNetworkDeviceNotice("网络详情");
         return (
           <div className={sectionClass}>
             <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-3">网络连接</h3>
@@ -1538,10 +1654,10 @@ function ServerDetailView({
       <div className="sticky top-0 z-10 h-12 px-4 border-b border-surface-200 dark:border-surface-800 bg-surface-50/95 dark:bg-surface-950/95 backdrop-blur-sm flex items-center justify-between">
         <div className="min-w-0">
           <p className="text-sm font-semibold text-surface-900 dark:text-surface-100 truncate">
-            {session?.serverName || "未选择会话"} · {SERVER_DETAIL_LABELS[tab.kind]}
+            {session?.serverName || "未选择会话"} · {isNetworkDevice && tab.kind === "overview" ? "设备信息" : SERVER_DETAIL_LABELS[tab.kind]}
           </p>
           <p className="text-xs text-surface-500 dark:text-surface-400">
-            {tab.kind === "overview" ? "系统信息约 3 秒刷新" : tab.kind === "memory" ? "内存约 3 秒刷新" : tab.kind === "disk" ? "磁盘约 3 秒刷新（文件系统约 8 秒刷新）" : "高频实时视图约 2 秒刷新"}
+            {isNetworkDevice ? "网络设备信息约 10 秒刷新" : tab.kind === "overview" ? "系统信息约 3 秒刷新" : tab.kind === "memory" ? "内存约 3 秒刷新" : tab.kind === "disk" ? "磁盘约 3 秒刷新（文件系统约 8 秒刷新）" : "高频实时视图约 2 秒刷新"}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -1625,8 +1741,14 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
   const connectionInitiatedRef = useRef<boolean>(false);
   // 跟踪 SSH 连接状态，用于控制 ResizeObserver 是否发送 resize 命令
   const sshConnectedRef = useRef<boolean>(session.isConnected || false);
-  const [_connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
+  const connectionStatusRef = useRef<ConnectionStatus>(session.isConnected ? "connected" : "connecting");
+  const [_connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(session.isConnected ? "connected" : "connecting");
   const [_errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const setTerminalConnectionStatus = useCallback((status: ConnectionStatus) => {
+    connectionStatusRef.current = status;
+    setConnectionStatus(status);
+  }, []);
   
   // 获取主题
   const { theme } = useThemeStore();
@@ -1744,6 +1866,87 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
 
       applyTerminalTheme(terminal, terminalRef.current, currentTheme);
 
+      const sendTerminalSize = (log = false) => {
+        const dims = fitAddon?.proposeDimensions();
+        if (!dims || dims.cols < 20 || dims.rows < 5) {
+          if (log) {
+            console.warn('[Terminal] 忽略异常终端尺寸:', dims);
+          }
+          return Promise.resolve();
+        }
+
+        if (log) {
+          console.log('[Terminal] 发送终端大小:', dims);
+        }
+
+        return invoke("resize_ssh", {
+          sessionId: session.id,
+          cols: dims.cols,
+          rows: dims.rows,
+        });
+      };
+
+      const writeLocalLine = (line = "") => {
+        if (!terminal) return;
+        terminal.writeln(line);
+        terminalStoreBufferRef.current += `${line}\r\n`;
+      };
+
+      const showReconnectHint = (message: string) => {
+        writeLocalLine("");
+        writeLocalLine(`\x1b[31m✗\x1b[0m ${message}`);
+        writeLocalLine("\x1b[90m按 Enter 重新连接\x1b[0m");
+      };
+
+      const connectSession = async (mode: "initial" | "reconnect") => {
+        if (connectionInitiatedRef.current) {
+          console.log("[Terminal] 连接已在进行中, 跳过重复连接");
+          return;
+        }
+
+        connectionInitiatedRef.current = true;
+        sshConnectedRef.current = false;
+        setTerminalConnectionStatus("connecting");
+        setErrorMessage(null);
+
+        if (mode === "reconnect") {
+          await invoke("disconnect_ssh", { sessionId: session.id }).catch((err) => {
+            console.warn("[Terminal] 清理旧 SSH 会话失败，继续重连:", err);
+          });
+          writeLocalLine("");
+          writeLocalLine(`\x1b[33m⏳\x1b[0m 正在重新连接 \x1b[1m${session.serverName}\x1b[0m ...`);
+        } else {
+          writeLocalLine(`\x1b[33m⏳\x1b[0m 正在连接 \x1b[1m${session.serverName}\x1b[0m ...`);
+        }
+
+        console.log("[Terminal] 开始调用 connect_ssh, sessionId=", session.id, "serverId=", session.serverId);
+
+        try {
+          const result = await invoke("connect_ssh", {
+            sessionId: session.id,
+            serverId: session.serverId,
+          });
+          console.log("[Terminal] connect_ssh 返回成功:", result);
+
+          sshConnectedRef.current = true;
+          setTerminalConnectionStatus("connected");
+          onConnected();
+          console.log("[Terminal] 连接状态已更新为 connected");
+
+          await sendTerminalSize(true);
+        } catch (err: any) {
+          console.error("[Terminal] connect_ssh 调用失败:", err);
+          sshConnectedRef.current = false;
+          setTerminalConnectionStatus("error");
+          setErrorMessage(err.toString());
+          onDisconnected();
+          showReconnectHint(`连接失败: ${err}`);
+          writeLocalLine("\x1b[90m请检查服务器配置和网络连接\x1b[0m");
+        } finally {
+          connectionInitiatedRef.current = false;
+        }
+      };
+
       // 每次重新挂载终端实例都要恢复缓存输出，否则切页返回后会出现空白终端。
       // 从 store 获取完整的 session 数据（包含 buffer）
       const currentSessionState = useTerminalStore.getState().sessions.find(s => s.id === session.id);
@@ -1760,14 +1963,7 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
             // 只有在 SSH 已连接时才通知后端终端大小变化
             // 避免在连接建立前发送 resize 命令导致 "会话不存在" 错误
             if (sshConnectedRef.current) {
-              const dims = fitAddon.proposeDimensions();
-              if (dims) {
-                invoke("resize_ssh", {
-                  sessionId: session.id,
-                  cols: dims.cols,
-                  rows: dims.rows,
-                }).catch(console.error);
-              }
+              sendTerminalSize().catch(console.error);
             }
           } catch (e) {
             console.error("Resize error:", e);
@@ -1805,16 +2001,32 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
 
       // 监听断开连接事件
       unlistenDisconnect = await listen<string>(`ssh-disconnected-${session.id}`, (event) => {
-        setConnectionStatus('disconnected');
-        onDisconnected();
-        if (terminal) {
-          terminal.writeln("");
-          terminal.writeln(`\x1b[31m✗\x1b[0m 连接已断开: ${event.payload}`);
+        if (connectionStatusRef.current === "connecting") {
+          console.log("[Terminal] 忽略连接过程中的旧断开事件:", event.payload);
+          return;
         }
+
+        sshConnectedRef.current = false;
+        connectionInitiatedRef.current = false;
+        setTerminalConnectionStatus('disconnected');
+        onDisconnected();
+        showReconnectHint(`连接已断开: ${event.payload}`);
       });
 
       // 处理用户输入 - 发送到后端
       terminal.onData((data: string) => {
+        const isEnter = data === "\r" || data === "\n" || data === "\r\n";
+        const canReconnect =
+          connectionStatusRef.current === "disconnected" ||
+          connectionStatusRef.current === "error";
+
+        if (!sshConnectedRef.current) {
+          if (canReconnect && isEnter) {
+            void connectSession("reconnect");
+          }
+          return;
+        }
+
         invoke("write_ssh", {
           sessionId: session.id,
           data: data,
@@ -1826,67 +2038,18 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
       // 如果已经连接过，就不需要再次连接了
       if (session.isConnected) {
         console.log('[Terminal] 会话已存在连接, 恢复显示');
-        setConnectionStatus('connected');
+        sshConnectedRef.current = true;
+        setTerminalConnectionStatus('connected');
         
         // 恢复后发送一次 resize 确保尺寸正确
         setTimeout(() => {
-            const dims = fitAddon.proposeDimensions();
-            if (dims) {
-              invoke("resize_ssh", {
-                sessionId: session.id,
-                cols: dims.cols,
-                rows: dims.rows,
-              }).catch(console.error);
-            }
+          sendTerminalSize().catch(console.error);
         }, 100);
         
         return;
       }
 
-      // 防止重复连接：如果已经发起过连接请求，直接返回
-      if (connectionInitiatedRef.current) {
-        console.log('[Terminal] 连接已在进行中, 跳过重复连接');
-        return;
-      }
-      connectionInitiatedRef.current = true;
-
-      // 显示连接中信息
-      terminal.writeln(`\x1b[33m⏳\x1b[0m 正在连接 \x1b[1m${session.serverName}\x1b[0m ...`);
-
-      // 发起 SSH 连接
-      console.log('[Terminal] 开始调用 connect_ssh, sessionId=', session.id, 'serverId=', session.serverId);
-      try {
-        const result = await invoke("connect_ssh", {
-          sessionId: session.id,
-          serverId: session.serverId,
-        });
-        console.log('[Terminal] connect_ssh 返回成功:', result);
-        
-        // 标记 SSH 已连接，允许 ResizeObserver 发送 resize 命令
-        sshConnectedRef.current = true;
-        setConnectionStatus('connected');
-        onConnected();
-        console.log('[Terminal] 连接状态已更新为 connected');
-        
-        // 发送初始终端大小
-        const dims = fitAddon.proposeDimensions();
-        if (dims) {
-          console.log('[Terminal] 发送终端大小:', dims);
-          await invoke("resize_ssh", {
-            sessionId: session.id,
-            cols: dims.cols,
-            rows: dims.rows,
-          });
-        }
-      } catch (err: any) {
-        console.error('[Terminal] connect_ssh 调用失败:', err);
-        setConnectionStatus('error');
-        setErrorMessage(err.toString());
-        terminal.writeln("");
-        terminal.writeln(`\x1b[31m✗\x1b[0m 连接失败: ${err}`);
-        terminal.writeln("");
-        terminal.writeln("\x1b[90m请检查服务器配置和网络连接\x1b[0m");
-      }
+      await connectSession("initial");
 
       return;
     };

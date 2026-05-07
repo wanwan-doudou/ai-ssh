@@ -53,7 +53,11 @@ pub fn anthropic_messages_url(base_url: Option<&str>) -> String {
     }
 }
 
-pub fn openai_compatible_url(base_url: Option<&str>, default_base_url: &str, endpoint: &str) -> String {
+pub fn openai_compatible_url(
+    base_url: Option<&str>,
+    default_base_url: &str,
+    endpoint: &str,
+) -> String {
     let base = normalized_base_url(base_url, default_base_url);
     let endpoint = endpoint.trim_start_matches('/');
 
@@ -67,7 +71,6 @@ pub fn openai_compatible_url(base_url: Option<&str>, default_base_url: &str, end
         format!("{}/v1/{}", base, endpoint)
     }
 }
-
 
 pub fn openai_models_url(base_url: Option<&str>) -> String {
     openai_compatible_url(base_url, DEFAULT_OPENAI_BASE_URL, "models")

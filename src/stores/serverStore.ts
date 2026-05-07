@@ -32,15 +32,25 @@ export const useServerStore = create<ServerStore>()((set, get) => ({
       const formattedServers = servers.map((s: any) => {
         const rawAuthType = s.authType ?? s.auth_type ?? 'password';
         const rawDeviceType = s.deviceType ?? s.device_type ?? 'linux';
+        const rawDeviceProfile = s.deviceProfile ?? s.device_profile ?? 'auto';
         const rawPrivateKeyPath = s.privateKeyPath ?? s.private_key_path ?? undefined;
+        const deviceType = rawDeviceType === 'network' || rawDeviceType === 'network_device' || rawDeviceType === 'networkDevice'
+          ? 'network' as const
+          : 'linux' as const;
+        const deviceProfile = deviceType === 'network' && ['auto', 'huawei', 'h3c', 'cisco', 'ruijie', 'fortigate'].includes(rawDeviceProfile)
+          ? rawDeviceProfile as Server['deviceProfile']
+          : 'auto' as const;
+        const rawLegacyAlgorithms = s.legacyAlgorithms ?? s.legacy_algorithms;
         return {
           ...s,
           authType: rawAuthType === 'privateKey' || rawAuthType === 'private_key'
             ? 'privateKey' as const
             : 'password' as const,
-          deviceType: rawDeviceType === 'network' || rawDeviceType === 'network_device' || rawDeviceType === 'networkDevice'
-            ? 'network' as const
-            : 'linux' as const,
+          deviceType,
+          deviceProfile,
+          legacyAlgorithms: rawLegacyAlgorithms == null
+            ? deviceType === 'network'
+            : Boolean(rawLegacyAlgorithms),
           privateKeyPath: rawPrivateKeyPath,
         };
       });
@@ -61,6 +71,8 @@ export const useServerStore = create<ServerStore>()((set, get) => ({
         username: serverData.username,
         authType: serverData.authType === 'privateKey' ? 'privateKey' : 'password',
         deviceType: serverData.deviceType,
+        deviceProfile: serverData.deviceType === 'network' ? serverData.deviceProfile : 'auto',
+        legacyAlgorithms: serverData.legacyAlgorithms ?? (serverData.deviceType === 'network'),
         password: serverData.password || null,
         privateKeyPath: serverData.privateKeyPath || null,
         group: serverData.group || null,
@@ -92,6 +104,8 @@ export const useServerStore = create<ServerStore>()((set, get) => ({
         username: merged.username,
         authType: merged.authType === 'privateKey' ? 'privateKey' : 'password',
         deviceType: merged.deviceType,
+        deviceProfile: merged.deviceType === 'network' ? merged.deviceProfile : 'auto',
+        legacyAlgorithms: merged.legacyAlgorithms ?? (merged.deviceType === 'network'),
         password: merged.password || null,
         privateKeyPath: merged.privateKeyPath || null,
         group: merged.group || null,

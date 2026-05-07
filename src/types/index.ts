@@ -7,12 +7,16 @@ export interface Server {
   username: string;
   authType: "password" | "privateKey";
   deviceType: "linux" | "network";
+  deviceProfile: DeviceProfile;
+  legacyAlgorithms: boolean;
   password?: string;
   privateKeyPath?: string;
   group?: string;
   createdAt: number;
   updatedAt: number;
 }
+
+export type DeviceProfile = "auto" | "huawei" | "h3c" | "cisco" | "ruijie" | "fortigate";
 
 // AI Provider 配置
 export interface Provider {
@@ -71,6 +75,9 @@ export interface ServerRuntimeInfo {
   netRxBytes: number;
   netTxBytes: number;
   collectedAt: number;
+  deviceModel?: string;
+  serialNumber?: string;
+  temperature?: string;
 }
 
 export interface ServerProcessInfo {

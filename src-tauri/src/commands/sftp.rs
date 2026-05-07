@@ -2,13 +2,13 @@
 //!
 //! 提供文件浏览、上传、下载等 SFTP 功能的前端接口
 
-use crate::models::{AuthType, DeviceType, Server};
+use crate::models::{AuthType, DeviceProfile, DeviceType, Server};
 use crate::sftp::{FileEntry, SftpManager};
 use crate::AppState;
 use rusqlite::params;
 use russh::client::{self, AuthResult};
-use russh::keys::PrivateKeyWithHashAlg;
 use russh::keys::ssh_key::PrivateKey;
+use russh::keys::PrivateKeyWithHashAlg;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -23,15 +23,13 @@ use crate::sftp::SftpClientHandler;
 
 // SftpClientHandler 已移动到 crate::sftp
 
-
 /// 加载私钥文件
 fn load_private_key(path: &str, _passphrase: Option<&str>) -> Result<PrivateKey, String> {
     let path = Path::new(path);
-    let key_data = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取私钥文件失败: {:?}", e))?;
-    
-    PrivateKey::from_openssh(key_data.as_bytes())
-        .map_err(|e| format!("加载私钥失败: {:?}", e))
+    let key_data =
+        std::fs::read_to_string(path).map_err(|e| format!("读取私钥文件失败: {:?}", e))?;
+
+    PrivateKey::from_openssh(key_data.as_bytes()).map_err(|e| format!("加载私钥失败: {:?}", e))
 }
 
 /// 建立 SFTP 连接
@@ -42,16 +40,19 @@ pub async fn sftp_connect(
     session_id: String,
     server_id: String,
 ) -> Result<String, String> {
-    println!("[SFTP] 建立 SFTP 连接: session_id={}, server_id={}", session_id, server_id);
-    
+    println!(
+        "[SFTP] 建立 SFTP 连接: session_id={}, server_id={}",
+        session_id, server_id
+    );
+
     // 从数据库获取服务器信息
     let server = {
         let conn = app_state.db.lock().map_err(|e| e.to_string())?;
-        
+
         let mut stmt = conn
-            .prepare("SELECT id, name, host, port, username, auth_type, password, private_key_path, group_name, device_type, created_at, updated_at FROM servers WHERE id = ?1")
+            .prepare("SELECT id, name, host, port, username, auth_type, password, private_key_path, group_name, device_type, device_profile, legacy_algorithms, created_at, updated_at FROM servers WHERE id = ?1")
             .map_err(|e| e.to_string())?;
-        
+
         stmt.query_row(params![server_id], |row| {
             Ok(Server {
                 id: row.get(0)?,
@@ -59,7 +60,10 @@ pub async fn sftp_connect(
                 host: row.get(2)?,
                 port: row.get::<_, i64>(3)? as u16,
                 username: row.get(4)?,
-                auth_type: row.get::<_, String>(5)?.parse().unwrap_or(AuthType::Password),
+                auth_type: row
+                    .get::<_, String>(5)?
+                    .parse()
+                    .unwrap_or(AuthType::Password),
                 password: row.get(6)?,
                 private_key_path: row.get(7)?,
                 group: row.get(8)?,
@@ -67,8 +71,13 @@ pub async fn sftp_connect(
                     .get::<_, String>(9)?
                     .parse()
                     .unwrap_or(DeviceType::Linux),
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
+                device_profile: row
+                    .get::<_, String>(10)?
+                    .parse()
+                    .unwrap_or(DeviceProfile::Auto),
+                legacy_algorithms: row.get::<_, i64>(11)? != 0,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
             })
         })
         .map_err(|e| format!("服务器不存在: {}", e))?
@@ -77,44 +86,44 @@ pub async fn sftp_connect(
     if server.device_type == DeviceType::Network {
         return Err("网络设备通常不提供 SFTP 服务，请改用终端命令交互".to_string());
     }
-    
+
     // 创建 SSH 配置
     let config = client::Config {
         inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
         ..Default::default()
     };
     let config = Arc::new(config);
-    
+
     // 建立 SSH 连接
     let addr = format!("{}:{}", server.host, server.port);
     let mut session = client::connect(config, addr.clone(), SftpClientHandler)
         .await
         .map_err(|e| format!("SSH 连接失败: {:?}", e))?;
-    
+
     // 认证
     let auth_result = match &server.auth_type {
         AuthType::Password => {
-            let password = server.password.as_ref()
-                .ok_or("密码认证需要提供密码")?;
+            let password = server.password.as_ref().ok_or("密码认证需要提供密码")?;
             session
                 .authenticate_password(&server.username, password)
                 .await
                 .map_err(|e| format!("密码认证失败: {:?}", e))?
         }
         AuthType::PrivateKey => {
-            let key_path = server.private_key_path.as_ref()
+            let key_path = server
+                .private_key_path
+                .as_ref()
                 .ok_or("密钥认证需要提供私钥路径")?;
-            
+
             let private_key = load_private_key(key_path, server.password.as_deref())?;
-            
-            let hash_alg = session.best_supported_rsa_hash().await
+
+            let hash_alg = session
+                .best_supported_rsa_hash()
+                .await
                 .map_err(|e| format!("获取 RSA 哈希算法失败: {:?}", e))?
                 .flatten();
-            
-            let key_with_hash = PrivateKeyWithHashAlg::new(
-                Arc::new(private_key),
-                hash_alg
-            );
+
+            let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(private_key), hash_alg);
 
             session
                 .authenticate_publickey(&server.username, key_with_hash)
@@ -122,30 +131,32 @@ pub async fn sftp_connect(
                 .map_err(|e| format!("密钥认证失败: {:?}", e))?
         }
     };
-    
+
     // 检查认证结果
     match auth_result {
         AuthResult::Success => {
             println!("[SFTP] 认证成功");
         }
-        AuthResult::Failure { remaining_methods, .. } => {
+        AuthResult::Failure {
+            remaining_methods, ..
+        } => {
             return Err(format!("认证失败，可用方法: {:?}", remaining_methods));
         }
     }
-    
+
     // 打开 SFTP 通道
     let channel = session
         .channel_open_session()
         .await
         .map_err(|e| format!("打开通道失败: {:?}", e))?;
-    
+
     // 连接到 SFTP
     let manager = &state.manager;
     manager.connect(&session_id, channel, session).await?;
-    
+
     // 获取当前目录
     let current_dir = manager.get_current_dir(&session_id).await?;
-    
+
     println!("[SFTP] SFTP 连接成功，当前目录: {}", current_dir);
     Ok(current_dir)
 }
@@ -262,13 +273,15 @@ pub async fn sftp_download_to_file(
     task_id: Option<String>,
 ) -> Result<(), String> {
     let manager = &state.manager;
-    manager.download_to_file(
-        &session_id,
-        &remote_path,
-        &local_path,
-        task_id.as_deref(),
-        Some(app),
-    ).await
+    manager
+        .download_to_file(
+            &session_id,
+            &remote_path,
+            &local_path,
+            task_id.as_deref(),
+            Some(app),
+        )
+        .await
 }
 
 /// 从本地文件高性能上传到远程（直接读取本地文件，使用 8MB 分块）
@@ -284,15 +297,16 @@ pub async fn sftp_upload_from_file(
 ) -> Result<(), String> {
     // 直接调用上传方法，取消通过 is_task_cancelled 检查实现
     let manager = &state.manager;
-    manager.upload_from_file(
-        &session_id,
-        &local_path,
-        &remote_path,
-        task_id.as_deref(),
-        Some(app),
-    ).await
+    manager
+        .upload_from_file(
+            &session_id,
+            &local_path,
+            &remote_path,
+            task_id.as_deref(),
+            Some(app),
+        )
+        .await
 }
-
 
 /// 读取文件内容
 #[tauri::command]
@@ -303,7 +317,7 @@ pub async fn sftp_read_file(
 ) -> Result<String, String> {
     let manager = &state.manager;
     let content = manager.read_file(&session_id, &path).await?;
-    
+
     // 尝试转为 UTF-8 String
     String::from_utf8(content)
         .map_err(|e| format!("文件不是有效的文本文件 (UTF-8 解析失败): {:?}", e))
@@ -318,7 +332,9 @@ pub async fn sftp_write_file(
     content: String,
 ) -> Result<(), String> {
     let manager = &state.manager;
-    manager.write_file(&session_id, &path, content.as_bytes()).await
+    manager
+        .write_file(&session_id, &path, content.as_bytes())
+        .await
 }
 
 /// 断开 SFTP 会话
@@ -330,4 +346,3 @@ pub async fn sftp_disconnect(
     let manager = &state.manager;
     manager.disconnect(&session_id).await
 }
-

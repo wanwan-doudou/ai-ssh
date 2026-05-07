@@ -1,21 +1,21 @@
 //! AI-SSH Terminal - Rust 后端入口
-//! 
+//!
 //! 提供 SSH 连接管理、数据持久化、加密等核心功能
 
 mod commands;
-mod models;
-mod services;
 mod db;
-mod ssh;
-mod sftp;
+mod models;
 mod provider_utils;
+mod services;
+mod sftp;
+mod ssh;
 
-use commands::ssh::SshState;
 use commands::sftp::SftpState;
-use ssh::SshManager;
+use commands::ssh::SshState;
 use sftp::SftpManager;
-use tauri::Manager;
+use ssh::SshManager;
 use std::sync::{Arc, Mutex};
+use tauri::Manager;
 
 /// 应用状态
 pub struct AppState {
@@ -33,25 +33,25 @@ pub fn run() {
             // 初始化数据库
             let app_dir = app.path().app_data_dir().expect("无法获取应用数据目录");
             std::fs::create_dir_all(&app_dir).expect("无法创建应用数据目录");
-            
+
             let db_path = app_dir.join("ai-ssh.db");
             let conn = db::init_database(&db_path).expect("数据库初始化失败");
-            
+
             // 管理应用状态
             app.manage(AppState {
                 db: Mutex::new(conn),
             });
-            
-            // 管理 SSH 状态 (使用 Arc 和 tokio Mutex)
+
+            // 管理 SSH 状态 (SshManager 内部按会话细粒度加锁)
             app.manage(SshState {
-                manager: Arc::new(tokio::sync::Mutex::new(SshManager::new())),
+                manager: Arc::new(SshManager::new()),
             });
-            
+
             // 管理 SFTP 状态
             app.manage(SftpState {
                 manager: Arc::new(SftpManager::new()),
             });
-            
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -95,11 +95,9 @@ pub fn run() {
             commands::sftp::sftp_upload_from_file,
             commands::sftp::sftp_read_file,
             commands::sftp::sftp_write_file,
-
             commands::sftp::sftp_cancel_upload,
             commands::sftp::sftp_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用时出错");
 }
-

@@ -7,10 +7,10 @@ use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use tauri::Emitter;
-use tokio::sync::Mutex;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt};
+use tauri::Emitter;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 /// SFTP 客户端处理器
 #[derive(Clone)]
@@ -85,15 +85,19 @@ impl SftpManager {
         println!("[SFTP] 开始建立 SFTP 会话 session_id={}", session_id);
 
         // 请求 SFTP 子系统
-        channel.request_subsystem(false, "sftp").await
+        channel
+            .request_subsystem(false, "sftp")
+            .await
             .map_err(|e| format!("请求 SFTP 子系统失败: {:?}", e))?;
 
         // 创建 SFTP 会话
-        let sftp = SftpSession::new(channel.into_stream()).await
+        let sftp = SftpSession::new(channel.into_stream())
+            .await
             .map_err(|e| format!("创建 SFTP 会话失败: {:?}", e))?;
 
         // 获取当前工作目录
-        let current_dir = sftp.canonicalize(".")
+        let current_dir = sftp
+            .canonicalize(".")
             .await
             .map_err(|e| format!("获取工作目录失败: {:?}", e))?;
 
@@ -101,11 +105,14 @@ impl SftpManager {
 
         // 存储会话
         let mut sessions = self.sessions.lock().await;
-        sessions.insert(session_id.to_string(), SftpSessionMeta {
-            session: sftp,
-            ssh_client: Arc::new(ssh_client),
-            current_dir,
-        });
+        sessions.insert(
+            session_id.to_string(),
+            SftpSessionMeta {
+                session: sftp,
+                ssh_client: Arc::new(ssh_client),
+                current_dir,
+            },
+        );
 
         Ok(())
     }
@@ -113,9 +120,8 @@ impl SftpManager {
     /// 列出目录内容
     pub async fn list_dir(&self, session_id: &str, path: &str) -> Result<Vec<FileEntry>, String> {
         let mut sessions = self.sessions.lock().await;
-        
-        let meta = sessions.get_mut(session_id)
-            .ok_or("SFTP 会话不存在")?;
+
+        let meta = sessions.get_mut(session_id).ok_or("SFTP 会话不存在")?;
 
         // 如果路径为空或相对路径，基于当前目录解析
         let full_path = if path.is_empty() || path == "." {
@@ -129,7 +135,9 @@ impl SftpManager {
         println!("[SFTP] 列出目录: {}", full_path);
 
         // 读取目录
-        let entries = meta.session.read_dir(&full_path)
+        let entries = meta
+            .session
+            .read_dir(&full_path)
             .await
             .map_err(|e| format!("读取目录失败: {:?}", e))?;
 
@@ -138,10 +146,10 @@ impl SftpManager {
         for entry in entries {
             let file_name = entry.file_name();
             let file_path = format!("{}/{}", full_path, file_name);
-            
+
             // 获取文件属性
             let attrs = entry.metadata();
-            
+
             result.push(FileEntry {
                 name: file_name,
                 path: file_path,
@@ -149,18 +157,22 @@ impl SftpManager {
                 size: attrs.size.unwrap_or(0),
                 modified: attrs.mtime.unwrap_or(0) as u64,
                 permissions: format_permissions(attrs.permissions.unwrap_or(0)),
-                owner: attrs.uid.map(|u| u.to_string()).unwrap_or_else(|| "-".to_string()),
-                group: attrs.gid.map(|g| g.to_string()).unwrap_or_else(|| "-".to_string()),
+                owner: attrs
+                    .uid
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                group: attrs
+                    .gid
+                    .map(|g| g.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
             });
         }
 
         // 按类型和名称排序（目录优先）
-        result.sort_by(|a, b| {
-            match (a.is_dir, b.is_dir) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            }
+        result.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         });
 
         Ok(result)
@@ -169,17 +181,20 @@ impl SftpManager {
     /// 更改当前工作目录
     pub async fn change_dir(&self, session_id: &str, path: &str) -> Result<String, String> {
         let mut sessions = self.sessions.lock().await;
-        
-        let meta = sessions.get_mut(session_id)
-            .ok_or("SFTP 会话不存在")?;
+
+        let meta = sessions.get_mut(session_id).ok_or("SFTP 会话不存在")?;
 
         // 解析路径
-        let new_path = meta.session.canonicalize(path)
+        let new_path = meta
+            .session
+            .canonicalize(path)
             .await
             .map_err(|e| format!("路径解析失败: {:?}", e))?;
 
         // 验证是目录
-        let attrs = meta.session.metadata(&new_path)
+        let attrs = meta
+            .session
+            .metadata(&new_path)
             .await
             .map_err(|e| format!("获取路径信息失败: {:?}", e))?;
 
@@ -194,9 +209,8 @@ impl SftpManager {
     /// 获取当前工作目录
     pub async fn get_current_dir(&self, session_id: &str) -> Result<String, String> {
         let sessions = self.sessions.lock().await;
-        
-        let meta = sessions.get(session_id)
-            .ok_or("SFTP 会话不存在")?;
+
+        let meta = sessions.get(session_id).ok_or("SFTP 会话不存在")?;
 
         Ok(meta.current_dir.clone())
     }
@@ -204,11 +218,11 @@ impl SftpManager {
     /// 创建目录
     pub async fn mkdir(&self, session_id: &str, path: &str) -> Result<(), String> {
         let sessions = self.sessions.lock().await;
-        
-        let meta = sessions.get(session_id)
-            .ok_or("SFTP 会话不存在")?;
 
-        meta.session.create_dir(path)
+        let meta = sessions.get(session_id).ok_or("SFTP 会话不存在")?;
+
+        meta.session
+            .create_dir(path)
             .await
             .map_err(|e| format!("创建目录失败: {:?}", e))
     }
@@ -216,44 +230,50 @@ impl SftpManager {
     /// 创建空文件
     pub async fn create_file(&self, session_id: &str, path: &str) -> Result<(), String> {
         let sessions = self.sessions.lock().await;
-        
-        let meta = sessions.get(session_id)
-            .ok_or("SFTP 会话不存在")?;
+
+        let meta = sessions.get(session_id).ok_or("SFTP 会话不存在")?;
 
         // 使用 create 创建文件，如果文件已存在会被截断为空
-        meta.session.create(path)
+        meta.session
+            .create(path)
             .await
             .map_err(|e| format!("创建文件失败: {:?}", e))?;
-            
+
         Ok(())
     }
 
     /// 删除文件或目录
     pub async fn remove(&self, session_id: &str, path: &str, is_dir: bool) -> Result<(), String> {
         let sessions = self.sessions.lock().await;
-        
-        let meta = sessions.get(session_id)
-            .ok_or("SFTP 会话不存在")?;
+
+        let meta = sessions.get(session_id).ok_or("SFTP 会话不存在")?;
 
         if is_dir {
-            meta.session.remove_dir(path)
+            meta.session
+                .remove_dir(path)
                 .await
                 .map_err(|e| format!("删除目录失败: {:?}", e))
         } else {
-            meta.session.remove_file(path)
+            meta.session
+                .remove_file(path)
                 .await
                 .map_err(|e| format!("删除文件失败: {:?}", e))
         }
     }
 
     /// 重命名文件或目录
-    pub async fn rename(&self, session_id: &str, old_path: &str, new_path: &str) -> Result<(), String> {
+    pub async fn rename(
+        &self,
+        session_id: &str,
+        old_path: &str,
+        new_path: &str,
+    ) -> Result<(), String> {
         let sessions = self.sessions.lock().await;
-        
-        let meta = sessions.get(session_id)
-            .ok_or("SFTP 会话不存在")?;
 
-        meta.session.rename(old_path, new_path)
+        let meta = sessions.get(session_id).ok_or("SFTP 会话不存在")?;
+
+        meta.session
+            .rename(old_path, new_path)
             .await
             .map_err(|e| format!("重命名失败: {:?}", e))
     }
@@ -261,9 +281,8 @@ impl SftpManager {
     /// 修改文件或目录权限
     pub async fn chmod(&self, session_id: &str, path: &str, mode: u32) -> Result<(), String> {
         let sessions = self.sessions.lock().await;
-        
-        let meta = sessions.get(session_id)
-            .ok_or("SFTP 会话不存在")?;
+
+        let meta = sessions.get(session_id).ok_or("SFTP 会话不存在")?;
 
         // 创建只包含权限的 FileAttributes
         let attrs = russh_sftp::protocol::FileAttributes {
@@ -272,7 +291,8 @@ impl SftpManager {
         };
 
         // 使用 set_metadata 设置权限
-        meta.session.set_metadata(path, attrs)
+        meta.session
+            .set_metadata(path, attrs)
             .await
             .map_err(|e| format!("修改权限失败: {:?}", e))
     }
@@ -281,17 +301,17 @@ impl SftpManager {
     pub async fn cancel_upload(&self, _session_id: &str, token: &str) -> Result<(), String> {
         let mut cancelled = self.cancelled_tasks.lock().await;
         cancelled.insert(token.to_string());
-        
+
         println!("[SFTP] 任务已标记为取消: {}", token);
         Ok(())
     }
-    
+
     /// 检查任务是否已被取消
     pub async fn is_task_cancelled(&self, task_id: &str) -> bool {
         let cancelled = self.cancelled_tasks.lock().await;
         cancelled.contains(task_id)
     }
-    
+
     /// 清理已取消的任务标记
     pub async fn clear_cancelled_task(&self, task_id: &str) {
         let mut cancelled = self.cancelled_tasks.lock().await;
@@ -307,23 +327,41 @@ impl SftpManager {
         task_id: Option<&str>,
         app_handle: Option<tauri::AppHandle>,
     ) -> Result<(), String> {
-         // 获取远程文件大小
+        // 获取远程文件大小
         let file_size = {
             let mut sessions = self.sessions.lock().await;
-            let meta = sessions.get_mut(session_id)
-                .ok_or("SFTP 会话不存在")?;
-            meta.session.metadata(remote_path)
+            let meta = sessions.get_mut(session_id).ok_or("SFTP 会话不存在")?;
+            meta.session
+                .metadata(remote_path)
                 .await
                 .map_err(|e| format!("获取文件信息失败: {:?}", e))?
-                .size.unwrap_or(0) as u64
+                .size
+                .unwrap_or(0) as u64
         };
 
         // 小文件单流下载
         if file_size < 20 * 1024 * 1024 {
-            return self.download_single(session_id, remote_path, local_path, file_size, task_id, app_handle).await;
+            return self
+                .download_single(
+                    session_id,
+                    remote_path,
+                    local_path,
+                    file_size,
+                    task_id,
+                    app_handle,
+                )
+                .await;
         }
 
-        self.download_concurrent(session_id, remote_path, local_path, file_size, task_id, app_handle).await
+        self.download_concurrent(
+            session_id,
+            remote_path,
+            local_path,
+            file_size,
+            task_id,
+            app_handle,
+        )
+        .await
     }
 
     /// 单流下载逻辑
@@ -338,11 +376,12 @@ impl SftpManager {
     ) -> Result<(), String> {
         let mut sessions = self.sessions.lock().await;
 
-        let meta = sessions.get_mut(session_id)
-            .ok_or("SFTP 会话不存在")?;
+        let meta = sessions.get_mut(session_id).ok_or("SFTP 会话不存在")?;
 
         // 打开远程文件
-        let mut remote_file = meta.session.open(remote_path)
+        let mut remote_file = meta
+            .session
+            .open(remote_path)
             .await
             .map_err(|e| format!("打开远程文件失败: {:?}", e))?;
 
@@ -354,17 +393,17 @@ impl SftpManager {
         // 分块读写（8MB/块 - 适合万兆网络）
         const CHUNK_SIZE: usize = 4 * 1024 * 1024;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        
+
         let mut chunk_buf = vec![0u8; CHUNK_SIZE];
         let mut transferred: u64 = 0;
         let start_time = std::time::Instant::now();
 
         loop {
             // 这里缺少 is_task_cancelled 检查，但为了保持原逻辑先这样，或者加上?
-            // 原逻辑没有在 download 循环里检查 cancelled_tasks? 
+            // 原逻辑没有在 download 循环里检查 cancelled_tasks?
             // 之前的代码里没有。我们加上吧。
             if let Some(tid) = task_id {
-                // 需要解锁 sessions 才能调用 self.is_task_cancelled? 
+                // 需要解锁 sessions 才能调用 self.is_task_cancelled?
                 // 不，self.is_task_cancelled 锁的是 cancelled_tasks，不冲突。
                 if self.is_task_cancelled(tid).await {
                     self.clear_cancelled_task(tid).await;
@@ -372,36 +411,48 @@ impl SftpManager {
                 }
             }
 
-            let n = remote_file.read(&mut chunk_buf)
+            let n = remote_file
+                .read(&mut chunk_buf)
                 .await
                 .map_err(|e| format!("读取文件失败: {:?}", e))?;
-            
+
             if n == 0 {
                 break;
             }
-            
+
             // 直接写入本地文件
-            local_file.write_all(&chunk_buf[..n])
+            local_file
+                .write_all(&chunk_buf[..n])
                 .await
                 .map_err(|e| format!("写入本地文件失败: {:?}", e))?;
-            
+
             transferred += n as u64;
 
             // 发送进度事件
             if let (Some(tid), Some(app)) = (&task_id, &app_handle) {
                 let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 { transferred as f64 / elapsed } else { 0.0 };
-                
-                let _ = app.emit(&format!("sftp-progress-{}", tid), serde_json::json!({
-                    "taskId": tid,
-                    "transferred": transferred,
-                    "total": file_size,
-                    "speed": speed as u64,
-                }));
+                let speed = if elapsed > 0.0 {
+                    transferred as f64 / elapsed
+                } else {
+                    0.0
+                };
+
+                let _ = app.emit(
+                    &format!("sftp-progress-{}", tid),
+                    serde_json::json!({
+                        "taskId": tid,
+                        "transferred": transferred,
+                        "total": file_size,
+                        "speed": speed as u64,
+                    }),
+                );
             }
         }
 
-        local_file.flush().await.map_err(|e| format!("刷新文件失败: {:?}", e))?;
+        local_file
+            .flush()
+            .await
+            .map_err(|e| format!("刷新文件失败: {:?}", e))?;
         Ok(())
     }
 
@@ -415,35 +466,44 @@ impl SftpManager {
         task_id: Option<&str>,
         app_handle: Option<tauri::AppHandle>,
     ) -> Result<(), String> {
-        println!("[SFTP] 开始并发下载 (6线程): {} -> {}", remote_path, local_path);
+        println!(
+            "[SFTP] 开始并发下载 (6线程): {} -> {}",
+            remote_path, local_path
+        );
 
         let ssh_client = {
             let sessions = self.sessions.lock().await;
-            sessions.get(session_id)
+            sessions
+                .get(session_id)
                 .map(|m| m.ssh_client.clone())
                 .ok_or("SFTP 会话不存在")?
         };
 
         let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>)>(4);
         let local_path_owned = local_path.to_string();
-        
+
         // Writer Task
         let writer_handle = tokio::spawn(async move {
-            let mut file = tokio::fs::File::create(&local_path_owned).await
+            let mut file = tokio::fs::File::create(&local_path_owned)
+                .await
                 .map_err(|e| format!("创建本地文件失败: {:?}", e))?;
-            
+
             if let Err(e) = file.set_len(file_size).await {
                 println!("[SFTP] 警告: set_len 失败: {:?}", e);
             }
 
             use tokio::io::{AsyncSeekExt, AsyncWriteExt};
             while let Some((offset, data)) = write_rx.recv().await {
-                file.seek(std::io::SeekFrom::Start(offset)).await
+                file.seek(std::io::SeekFrom::Start(offset))
+                    .await
                     .map_err(|e| format!("Writer Seek 失败: {:?}", e))?;
-                file.write_all(&data).await
+                file.write_all(&data)
+                    .await
                     .map_err(|e| format!("Writer Write 失败: {:?}", e))?;
             }
-            file.flush().await.map_err(|e| format!("Writer Flush 失败: {:?}", e))?;
+            file.flush()
+                .await
+                .map_err(|e| format!("Writer Flush 失败: {:?}", e))?;
             Ok::<(), String>(())
         });
 
@@ -457,23 +517,38 @@ impl SftpManager {
         for _ in 0..worker_count {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<(u64, u64)>(2);
             senders.push(tx);
-            
+
             let client = ssh_client.clone();
             let r_path = remote_path.to_string();
             let c_cancelled = is_cancelled.clone();
             let w_tx = write_tx.clone();
 
             join_set.spawn(async move {
-                let channel = client.channel_open_session().await.map_err(|e: russh::Error| e.to_string())?;
-                channel.request_subsystem(false, "sftp").await.map_err(|e: russh::Error| e.to_string())?;
-                let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e: russh_sftp::client::error::Error| e.to_string())?;
-                let mut file = sftp.open(&r_path).await.map_err(|e: russh_sftp::client::error::Error| e.to_string())?;
+                let channel = client
+                    .channel_open_session()
+                    .await
+                    .map_err(|e: russh::Error| e.to_string())?;
+                channel
+                    .request_subsystem(false, "sftp")
+                    .await
+                    .map_err(|e: russh::Error| e.to_string())?;
+                let sftp = SftpSession::new(channel.into_stream())
+                    .await
+                    .map_err(|e: russh_sftp::client::error::Error| e.to_string())?;
+                let mut file = sftp
+                    .open(&r_path)
+                    .await
+                    .map_err(|e: russh_sftp::client::error::Error| e.to_string())?;
 
                 while let Some((offset, len)) = rx.recv().await {
-                    if c_cancelled.load(Ordering::SeqCst) { break; }
+                    if c_cancelled.load(Ordering::SeqCst) {
+                        break;
+                    }
 
-                    file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|e: std::io::Error| e.to_string())?;
-                    
+                    file.seek(std::io::SeekFrom::Start(offset))
+                        .await
+                        .map_err(|e: std::io::Error| e.to_string())?;
+
                     let mut buf = vec![0u8; len as usize];
                     let mut read_cnt = 0;
                     while read_cnt < len as usize {
@@ -511,17 +586,23 @@ impl SftpManager {
                 }
             }
             if is_cancelled.load(Ordering::SeqCst) {
-                 return Err("任务已取消/失败".to_string());
+                return Err("任务已取消/失败".to_string());
             }
 
-            if offset >= file_size { break; }
+            if offset >= file_size {
+                break;
+            }
 
             let remaining = file_size - offset;
-            let len = if remaining > CHUNK_SIZE as u64 { CHUNK_SIZE as u64 } else { remaining };
+            let len = if remaining > CHUNK_SIZE as u64 {
+                CHUNK_SIZE as u64
+            } else {
+                remaining
+            };
 
             if let Err(_) = senders[worker_idx].send((offset, len)).await {
-                 is_cancelled.store(true, Ordering::SeqCst);
-                 return Err("发送任务失败".to_string());
+                is_cancelled.store(true, Ordering::SeqCst);
+                return Err("发送任务失败".to_string());
             }
 
             offset += len;
@@ -530,7 +611,11 @@ impl SftpManager {
 
             if let (Some(ref tid), Some(ref app)) = (&task_id_owned, &app_handle) {
                 let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 { transferred as f64 / elapsed } else { 0.0 };
+                let speed = if elapsed > 0.0 {
+                    transferred as f64 / elapsed
+                } else {
+                    0.0
+                };
                 let _ = app.emit(&format!("sftp-progress-{}", tid), serde_json::json!({
                     "taskId": tid, "transferred": transferred, "total": file_size, "speed": speed as u64 
                 }));
@@ -540,24 +625,30 @@ impl SftpManager {
         drop(senders);
 
         while let Some(res) = join_set.join_next().await {
-             match res {
-                Ok(Ok(())) => {},
-                Ok(Err(e)) => { is_cancelled.store(true, Ordering::SeqCst); return Err(format!("Worker 错误: {}", e)); }
-                Err(e) => { is_cancelled.store(true, Ordering::SeqCst); return Err(format!("Worker Panic: {:?}", e)); }
+            match res {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    is_cancelled.store(true, Ordering::SeqCst);
+                    return Err(format!("Worker 错误: {}", e));
+                }
+                Err(e) => {
+                    is_cancelled.store(true, Ordering::SeqCst);
+                    return Err(format!("Worker Panic: {:?}", e));
+                }
             }
         }
-        
+
         let writer_res = writer_handle.await;
         match writer_res {
-            Ok(Ok(())) => {},
+            Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(format!("写入任务失败: {}", e)),
             Err(e) => return Err(format!("写入任务 Panic: {:?}", e)),
         }
-        
+
         if is_cancelled.load(Ordering::SeqCst) {
-             return Err("下载失败".to_string());
+            return Err("下载失败".to_string());
         }
-        
+
         println!("[SFTP] 并发下载完成");
         Ok(())
     }
@@ -579,10 +670,27 @@ impl SftpManager {
 
         // 小文件（< 20MB）使用单流上传，大文件使用并发上传
         if file_size < 20 * 1024 * 1024 {
-            return self.upload_single(session_id, local_path, remote_path, file_size, task_id, app_handle).await;
+            return self
+                .upload_single(
+                    session_id,
+                    local_path,
+                    remote_path,
+                    file_size,
+                    task_id,
+                    app_handle,
+                )
+                .await;
         }
 
-        self.upload_concurrent(session_id, local_path, remote_path, file_size, task_id, app_handle).await
+        self.upload_concurrent(
+            session_id,
+            local_path,
+            remote_path,
+            file_size,
+            task_id,
+            app_handle,
+        )
+        .await
     }
 
     /// 单流上传实现（原逻辑）
@@ -595,7 +703,10 @@ impl SftpManager {
         task_id: Option<&str>,
         app_handle: Option<tauri::AppHandle>,
     ) -> Result<(), String> {
-        println!("[SFTP] 开始单流上传: {} -> {}, 大小: {} 字节", local_path, remote_path, file_size);
+        println!(
+            "[SFTP] 开始单流上传: {} -> {}, 大小: {} 字节",
+            local_path, remote_path, file_size
+        );
 
         // 打开本地文件
         let mut local_file = tokio::fs::File::open(local_path)
@@ -605,9 +716,9 @@ impl SftpManager {
         // 创建远程文件（需要获取锁）
         let mut remote_file = {
             let mut sessions = self.sessions.lock().await;
-            let meta = sessions.get_mut(session_id)
-                .ok_or("SFTP 会话不存在")?;
-            meta.session.create(remote_path)
+            let meta = sessions.get_mut(session_id).ok_or("SFTP 会话不存在")?;
+            meta.session
+                .create(remote_path)
                 .await
                 .map_err(|e| format!("创建远程文件失败: {:?}", e))?
         };
@@ -615,7 +726,7 @@ impl SftpManager {
         // 分块读写
         const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4MB
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        
+
         let mut chunk_buf = vec![0u8; CHUNK_SIZE];
         let mut transferred: u64 = 0;
         let start_time = std::time::Instant::now();
@@ -630,38 +741,48 @@ impl SftpManager {
                     return Err("上传已取消".to_string());
                 }
             }
-            
-            let n = local_file.read(&mut chunk_buf)
+
+            let n = local_file
+                .read(&mut chunk_buf)
                 .await
                 .map_err(|e| format!("读取本地文件失败: {:?}", e))?;
-            
+
             if n == 0 {
                 break;
             }
-            
+
             // 写入远程文件
-            remote_file.write_all(&chunk_buf[..n])
+            remote_file
+                .write_all(&chunk_buf[..n])
                 .await
                 .map_err(|e| format!("写入远程文件失败: {:?}", e))?;
-            
+
             transferred += n as u64;
 
             // 发送进度事件
             if let (Some(ref tid), Some(ref app)) = (&task_id_owned, &app_handle) {
                 let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 { transferred as f64 / elapsed } else { 0.0 };
-                
-                let _ = app.emit(&format!("sftp-progress-{}", tid), serde_json::json!({
-                    "taskId": tid,
-                    "transferred": transferred,
-                    "total": file_size,
-                    "speed": speed as u64,
-                }));
+                let speed = if elapsed > 0.0 {
+                    transferred as f64 / elapsed
+                } else {
+                    0.0
+                };
+
+                let _ = app.emit(
+                    &format!("sftp-progress-{}", tid),
+                    serde_json::json!({
+                        "taskId": tid,
+                        "transferred": transferred,
+                        "total": file_size,
+                        "speed": speed as u64,
+                    }),
+                );
             }
         }
 
         // 刷新远程文件
-        remote_file.flush()
+        remote_file
+            .flush()
             .await
             .map_err(|e| format!("刷新远程文件失败: {:?}", e))?;
 
@@ -678,11 +799,15 @@ impl SftpManager {
         task_id: Option<&str>,
         app_handle: Option<tauri::AppHandle>,
     ) -> Result<(), String> {
-        println!("[SFTP] 开始并发上传 (6线程): {} -> {}", local_path, remote_path);
-        
+        println!(
+            "[SFTP] 开始并发上传 (6线程): {} -> {}",
+            local_path, remote_path
+        );
+
         let ssh_client = {
             let sessions = self.sessions.lock().await;
-            sessions.get(session_id)
+            sessions
+                .get(session_id)
                 .map(|m| m.ssh_client.clone())
                 .ok_or("SFTP 会话不存在")?
         };
@@ -697,45 +822,67 @@ impl SftpManager {
         for _ in 0..worker_count {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>)>(2);
             senders.push(tx);
-            
+
             let client = ssh_client.clone();
             let r_path = remote_path.to_string();
             let c_cancelled = is_cancelled.clone();
-            
+
             join_set.spawn(async move {
-                let channel = client.channel_open_session().await.map_err(|e: russh::Error| format!("SessionOpen: {}", e))?;
-                channel.request_subsystem(false, "sftp").await.map_err(|e: russh::Error| format!("Subsystem: {}", e))?;
-                let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e: russh_sftp::client::error::Error| format!("SftpInit: {}", e))?;
-                
+                let channel = client
+                    .channel_open_session()
+                    .await
+                    .map_err(|e: russh::Error| format!("SessionOpen: {}", e))?;
+                channel
+                    .request_subsystem(false, "sftp")
+                    .await
+                    .map_err(|e: russh::Error| format!("Subsystem: {}", e))?;
+                let sftp = SftpSession::new(channel.into_stream())
+                    .await
+                    .map_err(|e: russh_sftp::client::error::Error| format!("SftpInit: {}", e))?;
+
                 // Use OpenFlags for correct mode (WRITE w/o TRUNCATE)
                 // Assuming open_with_flags exists. If not, we might need a different method.
                 // Flags: SSH_FXF_WRITE (0x00000002) | SSH_FXF_CREAT (0x00000008)
                 // But we don't want TRUNC (0x00000010)
-                let flags = russh_sftp::protocol::OpenFlags::WRITE | russh_sftp::protocol::OpenFlags::CREATE;
-                let mut file = sftp.open_with_flags(&r_path, flags).await
-                    .map_err(|e: russh_sftp::client::error::Error| format!("FileOpen({}): {}", r_path, e))?;
-                
+                let flags = russh_sftp::protocol::OpenFlags::WRITE
+                    | russh_sftp::protocol::OpenFlags::CREATE;
+                let mut file = sftp.open_with_flags(&r_path, flags).await.map_err(
+                    |e: russh_sftp::client::error::Error| format!("FileOpen({}): {}", r_path, e),
+                )?;
+
                 while let Some((offset, data)) = rx.recv().await {
-                    if c_cancelled.load(Ordering::SeqCst) { break; }
-                    
-                    file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|e: std::io::Error| format!("FileSeek: {}", e))?;
-                    file.write_all(&data).await.map_err(|e: std::io::Error| format!("FileWrite: {}", e))?;
+                    if c_cancelled.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    file.seek(std::io::SeekFrom::Start(offset))
+                        .await
+                        .map_err(|e: std::io::Error| format!("FileSeek: {}", e))?;
+                    file.write_all(&data)
+                        .await
+                        .map_err(|e: std::io::Error| format!("FileWrite: {}", e))?;
                 }
-                file.flush().await.map_err(|e: std::io::Error| format!("FileFlush: {}", e))?;
+                file.flush()
+                    .await
+                    .map_err(|e: std::io::Error| format!("FileFlush: {}", e))?;
                 Ok::<(), String>(())
             });
         }
 
         // 初始化远程文件
         {
-             let sessions = self.sessions.lock().await;
-             if let Some(meta) = sessions.get(session_id) {
-                 let _ = meta.session.create(remote_path).await
-                     .map_err(|e| format!("初始化远程文件失败: {:?}", e))?;
-             }
+            let sessions = self.sessions.lock().await;
+            if let Some(meta) = sessions.get(session_id) {
+                let _ = meta
+                    .session
+                    .create(remote_path)
+                    .await
+                    .map_err(|e| format!("初始化远程文件失败: {:?}", e))?;
+            }
         }
 
-        let mut local_file = tokio::fs::File::open(local_path).await
+        let mut local_file = tokio::fs::File::open(local_path)
+            .await
             .map_err(|e| format!("打开本地文件失败: {:?}", e))?;
 
         const CHUNK_SIZE: usize = 4 * 1024 * 1024;
@@ -754,31 +901,35 @@ impl SftpManager {
                 }
             }
             if is_cancelled.load(Ordering::SeqCst) {
-                 return Err("任务已取消/失败".to_string());
+                return Err("任务已取消/失败".to_string());
             }
 
             let mut chunk_buf = vec![0u8; CHUNK_SIZE];
-            let n = local_file.read(&mut chunk_buf).await
-                .map_err(|e| { is_cancelled.store(true, Ordering::SeqCst); format!("读取本地文件失败: {:?}", e) })?;
-            
-            if n == 0 { break; }
-            
+            let n = local_file.read(&mut chunk_buf).await.map_err(|e| {
+                is_cancelled.store(true, Ordering::SeqCst);
+                format!("读取本地文件失败: {:?}", e)
+            })?;
+
+            if n == 0 {
+                break;
+            }
+
             chunk_buf.truncate(n);
-            
+
             if let Err(_) = senders[worker_idx].send((offset, chunk_buf)).await {
-                 is_cancelled.store(true, Ordering::SeqCst);
-                 drop(senders); // Close remaining channels to stop other workers
-                 
-                 let mut err_msg = "发送任务到 Worker 失败 (Worker 通道已关闭)".to_string();
-                 // 尝试获取 Worker 的具体错误
-                 if let Some(res) = join_set.join_next().await {
-                     match res {
+                is_cancelled.store(true, Ordering::SeqCst);
+                drop(senders); // Close remaining channels to stop other workers
+
+                let mut err_msg = "发送任务到 Worker 失败 (Worker 通道已关闭)".to_string();
+                // 尝试获取 Worker 的具体错误
+                if let Some(res) = join_set.join_next().await {
+                    match res {
                         Ok(Err(e)) => err_msg = format!("Worker 错误: {}", e),
                         Err(e) => err_msg = format!("Worker Panic: {:?}", e),
                         _ => {}
-                     }
-                 }
-                 return Err(err_msg);
+                    }
+                }
+                return Err(err_msg);
             }
 
             offset += n as u64;
@@ -787,7 +938,11 @@ impl SftpManager {
 
             if let (Some(ref tid), Some(ref app)) = (&task_id_owned, &app_handle) {
                 let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 { transferred as f64 / elapsed } else { 0.0 };
+                let speed = if elapsed > 0.0 {
+                    transferred as f64 / elapsed
+                } else {
+                    0.0
+                };
                 let _ = app.emit(&format!("sftp-progress-{}", tid), serde_json::json!({
                     "taskId": tid, "transferred": transferred, "total": file_size, "speed": speed as u64 
                 }));
@@ -798,12 +953,18 @@ impl SftpManager {
 
         while let Some(res) = join_set.join_next().await {
             match res {
-                Ok(Ok(())) => {},
-                Ok(Err(e)) => { is_cancelled.store(true, Ordering::SeqCst); return Err(format!("Worker 错误: {}", e)); }
-                Err(e) => { is_cancelled.store(true, Ordering::SeqCst); return Err(format!("Worker Panic: {:?}", e)); }
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    is_cancelled.store(true, Ordering::SeqCst);
+                    return Err(format!("Worker 错误: {}", e));
+                }
+                Err(e) => {
+                    is_cancelled.store(true, Ordering::SeqCst);
+                    return Err(format!("Worker Panic: {:?}", e));
+                }
             }
         }
-        
+
         if is_cancelled.load(Ordering::SeqCst) {
             return Err("上传过程中出现错误".to_string());
         }
@@ -812,60 +973,78 @@ impl SftpManager {
         Ok(())
     }
 
-
-
-
     /// 读取远程文件内容 (适对于文本文件)
     pub async fn read_file(&self, session_id: &str, path: &str) -> Result<Vec<u8>, String> {
         let mut sessions = self.sessions.lock().await;
         // 注意：这里需要 session 的可变引用因为 open/create 需要 &self (但 session 是 struct 字段)
         // russh-sftp 的 method 需要 &self, meta.session 是 SftpSession
         let meta = sessions.get_mut(session_id).ok_or("SFTP 会话不存在")?;
-        
+
         // 限制最大读取大小 (例如 10MB)，防止前端崩溃
         const MAX_EDIT_SIZE: u64 = 10 * 1024 * 1024;
-        
+
         // 获取文件大小
-        let file_size = meta.session.metadata(path).await
+        let file_size = meta
+            .session
+            .metadata(path)
+            .await
             .map_err(|e| format!("获取文件信息失败: {:?}", e))?
-            .size.unwrap_or(0);
-            
+            .size
+            .unwrap_or(0);
+
         if file_size > MAX_EDIT_SIZE {
-            return Err(format!("文件过大 ({} MB), 不支持在线编辑 (最大 10MB)", file_size / 1024 / 1024));
+            return Err(format!(
+                "文件过大 ({} MB), 不支持在线编辑 (最大 10MB)",
+                file_size / 1024 / 1024
+            ));
         }
 
-        let mut file = meta.session.open(path).await
+        let mut file = meta
+            .session
+            .open(path)
+            .await
             .map_err(|e| format!("打开文件失败: {:?}", e))?;
-            
+
         let mut content = Vec::new();
-        file.read_to_end(&mut content).await
-             .map_err(|e| format!("读取文件内容失败: {:?}", e))?;
-             
+        file.read_to_end(&mut content)
+            .await
+            .map_err(|e| format!("读取文件内容失败: {:?}", e))?;
+
         Ok(content)
     }
 
     /// 写入内容到远程文件
-    pub async fn write_file(&self, session_id: &str, path: &str, content: &[u8]) -> Result<(), String> {
+    pub async fn write_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        content: &[u8],
+    ) -> Result<(), String> {
         let mut sessions = self.sessions.lock().await;
         let meta = sessions.get_mut(session_id).ok_or("SFTP 会话不存在")?;
-        
+
         // create 会截断文件
-        let mut file = meta.session.create(path).await
+        let mut file = meta
+            .session
+            .create(path)
+            .await
             .map_err(|e| format!("创建文件失败: {:?}", e))?;
-            
-        file.write_all(content).await
-             .map_err(|e| format!("写入文件失败: {:?}", e))?;
-        
-        file.flush().await
+
+        file.write_all(content)
+            .await
+            .map_err(|e| format!("写入文件失败: {:?}", e))?;
+
+        file.flush()
+            .await
             .map_err(|e| format!("刷新文件失败: {:?}", e))?;
-             
+
         Ok(())
     }
 
     /// 断开 SFTP 会话
     pub async fn disconnect(&self, session_id: &str) -> Result<(), String> {
         let mut sessions = self.sessions.lock().await;
-        
+
         if sessions.remove(session_id).is_some() {
             println!("[SFTP] SFTP 会话已断开: {}", session_id);
         }
@@ -883,9 +1062,9 @@ impl Default for SftpManager {
 /// 将数字权限转换为字符串格式（如 "drwxr-xr-x"）
 fn format_permissions(mode: u32) -> String {
     let file_type = match mode & 0o170000 {
-        0o040000 => 'd',  // 目录
-        0o120000 => 'l',  // 符号链接
-        _ => '-',         // 普通文件
+        0o040000 => 'd', // 目录
+        0o120000 => 'l', // 符号链接
+        _ => '-',        // 普通文件
     };
 
     let user = format_rwx((mode >> 6) & 0o7);

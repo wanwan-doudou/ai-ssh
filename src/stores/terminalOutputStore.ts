@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 // 终端输出缓冲区配置
-const MAX_BUFFER_SIZE = 60000; // 最大缓冲字符数
+const MAX_BUFFER_SIZE = 600000; // 最大缓冲字符数
 const POLLING_INTERVAL = 300; // 轮询间隔（毫秒）- 更频繁检测
 const MAX_WAIT_TIME = 1800000; // 最大等待时间 30 分钟
 const IDLE_THRESHOLD = 3000; // 输出静止阈值（毫秒）- 快速命令的基础等待时间
@@ -19,6 +19,13 @@ const SHELL_PROMPT_PATTERNS = [
   /^\w+@[\w.-]+\s*~.*[$#]\s*$/,           // user@host ~ $ 格式
   /^PS\s+[A-Z]:\\.*>\s*$/i,               // PowerShell: PS C:\path>
   /^[\w]+@[\w-]+\s*[$#]\s*$/,             // 简单格式：user@host $
+];
+
+const NETWORK_PROMPT_PATTERNS = [
+  /^[A-Za-z0-9_.:-]+(?:\([A-Za-z0-9_.:/-]+\))?\s*[>#]\s*$/, // Cisco/Ruijie/FortiGate: hostname# / hostname>
+  /^[A-Za-z0-9_.:-]+\s+\([^)]+\)\s*[>#]\s*$/,               // FortiGate VDOM: hostname (global) #
+  /^<[^>\r\n]{1,120}>\s*$/,                                  // Huawei/H3C user view: <hostname>
+  /^\[[~*]?[A-Za-z0-9_.:/-]+(?:-[A-Za-z0-9_.:/-]+)*\]\s*$/, // Huawei/H3C system view: [hostname-if]
 ];
 
 // 命令输出特征模式 - 匹配这些模式的行应被排除，不应被视为提示符
@@ -220,6 +227,24 @@ export function detectNewPromptLine(output: string): boolean {
   return isPromptLike;
 }
 
+function isNetworkPromptLikeLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.length > 160) return false;
+
+  if (COMMAND_OUTPUT_PATTERNS.some(p => p.test(trimmed))) {
+    return false;
+  }
+
+  return NETWORK_PROMPT_PATTERNS.some(pattern => pattern.test(trimmed));
+}
+
+export function detectNetworkPromptLine(output: string): boolean {
+  const lines = output.split('\n').filter(l => l.trim());
+  if (lines.length === 0) return false;
+
+  return isNetworkPromptLikeLine(lines[lines.length - 1]);
+}
+
 // 检测是否处于交互式程序中（如 less, more, vim 等）
 // 返回退出所需的按键，如果不在交互式程序中返回 null
 export function detectInteractiveProgram(output: string): string | null {
@@ -334,6 +359,41 @@ export function parseInstrumentedCommandOutput(
     exitCode,
     output: outputLines.join('\n').trim(),
   };
+}
+
+export function stripPlainCommandOutput(output: string, command: string): string {
+  const lines = output.replace(/\r/g, '').split('\n');
+  const commandText = command.trim();
+  let removedCommandEcho = false;
+
+  const outputLines = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return true;
+
+    if (
+      !removedCommandEcho &&
+      commandText &&
+      (
+        trimmed === commandText ||
+        (trimmed.endsWith(commandText) && trimmed.length <= commandText.length + 200)
+      )
+    ) {
+      removedCommandEcho = true;
+      return false;
+    }
+
+    return true;
+  });
+
+  while (outputLines.length > 0 && !outputLines[outputLines.length - 1].trim()) {
+    outputLines.pop();
+  }
+
+  if (outputLines.length > 0 && isNetworkPromptLikeLine(outputLines[outputLines.length - 1])) {
+    outputLines.pop();
+  }
+
+  return outputLines.join('\n').trim();
 }
 
 function isInternalCommandControlLine(line: string, markerId?: string): boolean {
