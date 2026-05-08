@@ -10,9 +10,28 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AiChatResponse {
     pub content: String,
     pub command: Option<String>,
+    pub file_write: Option<AiFileWrite>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiFileWrite {
+    pub path: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_if_missing: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ensure_newline: Option<bool>,
 }
 
 /// 历史消息结构（用于接收前端传来的历史）
@@ -22,20 +41,69 @@ pub struct HistoryMessage {
     pub content: String,
 }
 
-const AI_SYSTEM_PROMPT: &str = r#"你是一个智能 SSH 终端助手。帮助用户管理服务器、执行命令、分析输出。
+const AI_COMMON_SYSTEM_PROMPT: &str = r###"你是 SSH 终端助手，负责帮用户执行命令、分析输出、整理服务器信息。用中文简洁回复。
 
-回复规则：
-1. 用中文简洁回复。
-2. 需要让前端执行命令时，回复末尾必须单独给一个 JSON 代码块，格式严格如下：
+需要执行终端命令时，在回复末尾单独给一个 JSON command 代码块；具体命令必须符合当前设备类型。
+
+已有输出足够时直接总结；还需要继续时只给下一步动作。说明里的示例命令用行内代码，不要放进 bash/shell/sh 代码块。命令仍在运行时，不要把暂无输出当作失败或完成。"###;
+
+const AI_LINUX_ACTION_PROMPT: &str = r###"当前连接目标是 Linux/类 Unix 主机。
+
+需要执行 Linux 命令时使用 command：
 ```json
 {"command":"docker ps"}
 ```
-3. 一次最多给一个 command。不要把多个命令写在同一个 command 里，也不要用 &&、; 串联多个独立排查步骤。
-4. 如果任务需要多步排查，先选择最直接、最安全、只读的一条命令；等用户或前端返回结果后再决定下一步。
-5. 不要把示例命令、备选命令、命令清单放进 ```bash / ```shell / ```sh 代码块，避免被前端误认为可执行命令。说明性命令请用普通文本或行内代码。
-6. 如果只是解释、总结、分析已有输出，通常不要给 command。
-7. 分析命令输出时，提取关键信息，给出简明总结；如果确实还需要下一步，只给一个最相关的 command。
-8. 如果上下文提示某个命令仍在执行、尚未完成，不要把暂无输出判断为失败或无结果；请明确说明命令还没结束，只能基于当前已有输出判断。"#;
+
+需要创建新文件或完整覆盖文件时使用 write_file，不要用 shell 命令拼文件：
+```json
+{"action":"write_file","path":"/tmp/example.txt","content":["第一行","第二行"]}
+```
+
+需要修改已有文本文件时优先使用 update_file，不要重新输出整份文件：
+```json
+{"action":"update_file","path":"/tmp/example.txt","mode":"append","content":["","## 新增小节","新增内容"]}
+```
+可用 mode：append 追加片段；replace 用 oldContent 精确替换；insert_after/insert_before 配合 anchor 插入。content 只放新增或替换后的片段。
+
+每次最多返回一个动作：command、write_file 或 update_file。"###;
+
+const AI_NETWORK_ACTION_PROMPT: &str = r###"当前连接目标是交换机、防火墙、路由器等网络设备。
+
+网络设备通常没有可用的 SFTP 文件写入能力，禁止返回 write_file、update_file、fileWrite 或 file_write。
+需要查看或修改配置时，只能通过设备 CLI 交互，回复末尾最多给一个 JSON command：
+```json
+{"command":"show version"}
+```
+"###;
+
+fn is_network_device_type(device_type: Option<&str>) -> bool {
+    matches!(
+        device_type.unwrap_or("linux").trim().to_lowercase().as_str(),
+        "network" | "networkdevice" | "network-device" | "network_device"
+    )
+}
+
+fn normalized_device_profile(device_profile: Option<&str>) -> &str {
+    let profile = device_profile.unwrap_or("auto").trim();
+    if profile.is_empty() {
+        "auto"
+    } else {
+        profile
+    }
+}
+
+fn system_prompt_for_device(device_type: Option<&str>, device_profile: Option<&str>) -> String {
+    if is_network_device_type(device_type) {
+        format!(
+            "{}\n\n{}\n当前网络设备 profile：{}。如果 profile 为 auto，请先通过只读命令判断厂商和命令风格。",
+            AI_COMMON_SYSTEM_PROMPT,
+            AI_NETWORK_ACTION_PROMPT,
+            normalized_device_profile(device_profile)
+        )
+    } else {
+        format!("{}\n\n{}", AI_COMMON_SYSTEM_PROMPT, AI_LINUX_ACTION_PROMPT)
+    }
+}
 
 const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 256_000;
 const MIN_HISTORY_TOKEN_BUDGET: usize = 16_000;
@@ -121,6 +189,8 @@ pub async fn ai_chat(
     message: String,
     session_id: String,
     history: Option<Vec<HistoryMessage>>, // 新增：接收历史消息
+    device_type: Option<String>,
+    device_profile: Option<String>,
 ) -> Result<AiChatResponse, String> {
     // 保留 session_id 参数以维持前端 invoke 契约；非流式接口当前不按会话区分处理。
     let _ = &session_id;
@@ -150,6 +220,8 @@ pub async fn ai_chat(
 
     // 3. 构建消息历史
     let history_messages = history.unwrap_or_default();
+    let system_prompt =
+        system_prompt_for_device(device_type.as_deref(), device_profile.as_deref());
 
     // 4. 调用 AI API
     let client = reqwest::Client::builder()
@@ -162,7 +234,7 @@ pub async fn ai_chat(
             call_openai_compatible(
                 &client,
                 &provider,
-                AI_SYSTEM_PROMPT,
+                &system_prompt,
                 &message,
                 &history_messages,
             )
@@ -172,7 +244,7 @@ pub async fn ai_chat(
             call_claude(
                 &client,
                 &provider,
-                AI_SYSTEM_PROMPT,
+                &system_prompt,
                 &message,
                 &history_messages,
             )
@@ -182,7 +254,7 @@ pub async fn ai_chat(
             call_gemini(
                 &client,
                 &provider,
-                AI_SYSTEM_PROMPT,
+                &system_prompt,
                 &message,
                 &history_messages,
             )
@@ -192,18 +264,24 @@ pub async fn ai_chat(
 
     // 5. 清洗 think 模型的推理标签残片后再解析响应 (提取 Command)
     let cleaned_response_text = strip_think_blocks(&response_text);
-    let (content, command) = parse_ai_response(&cleaned_response_text);
+    let (content, command, file_write) = parse_ai_response(&cleaned_response_text);
 
-    Ok(AiChatResponse { content, command })
+    Ok(AiChatResponse {
+        content,
+        command,
+        file_write,
+    })
 }
 
 /// 流式事件数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
-    pub chunk: Option<String>,   // 增量文本块
-    pub done: bool,              // 是否完成
-    pub error: Option<String>,   // 错误信息
-    pub command: Option<String>, // 完成后解析出的命令
+    pub chunk: Option<String>,           // 增量文本块
+    pub done: bool,                      // 是否完成
+    pub error: Option<String>,           // 错误信息
+    pub command: Option<String>,         // 完成后解析出的命令
+    pub file_write: Option<AiFileWrite>, // 完成后解析出的文件写入动作
 }
 
 /// 流式 AI 聊天命令
@@ -215,6 +293,8 @@ pub async fn ai_chat_stream(
     message: String,
     session_id: String,
     history: Option<Vec<HistoryMessage>>,
+    device_type: Option<String>,
+    device_profile: Option<String>,
 ) -> Result<(), String> {
     let event_name = format!("ai-stream-{}", session_id);
 
@@ -243,6 +323,8 @@ pub async fn ai_chat_stream(
 
     // 3. 构建消息历史
     let history_messages = history.unwrap_or_default();
+    let system_prompt =
+        system_prompt_for_device(device_type.as_deref(), device_profile.as_deref());
 
     // 4. 创建 HTTP 客户端
     let client = reqwest::Client::builder()
@@ -257,7 +339,7 @@ pub async fn ai_chat_stream(
                 &app,
                 &client,
                 &provider,
-                AI_SYSTEM_PROMPT,
+                &system_prompt,
                 &message,
                 &history_messages,
                 &event_name,
@@ -269,7 +351,7 @@ pub async fn ai_chat_stream(
                 &app,
                 &client,
                 &provider,
-                AI_SYSTEM_PROMPT,
+                &system_prompt,
                 &message,
                 &history_messages,
                 &event_name,
@@ -281,7 +363,7 @@ pub async fn ai_chat_stream(
                 &app,
                 &client,
                 &provider,
-                AI_SYSTEM_PROMPT,
+                &system_prompt,
                 &message,
                 &history_messages,
                 &event_name,
@@ -299,6 +381,7 @@ pub async fn ai_chat_stream(
                 done: true,
                 error: Some(e),
                 command: None,
+                file_write: None,
             },
         );
     }
@@ -520,6 +603,7 @@ async fn call_openai_compatible_stream(
                                     done: false,
                                     error: None,
                                     command: None,
+                                    file_write: None,
                                 },
                             );
                         }
@@ -531,7 +615,7 @@ async fn call_openai_compatible_stream(
 
     // 解析命令并发送完成事件
     let full_content = strip_think_blocks(&raw_content);
-    let (_, command) = parse_ai_response(&full_content);
+    let (_, command, file_write) = parse_ai_response(&full_content);
     let _ = app.emit(
         event_name,
         StreamEvent {
@@ -539,6 +623,7 @@ async fn call_openai_compatible_stream(
             done: true,
             error: None,
             command,
+            file_write,
         },
     );
 
@@ -633,6 +718,7 @@ async fn call_claude_stream(
                                         done: false,
                                         error: None,
                                         command: None,
+                                        file_write: None,
                                     },
                                 );
                             }
@@ -645,7 +731,7 @@ async fn call_claude_stream(
 
     // 解析命令并发送完成事件
     let full_content = strip_think_blocks(&raw_content);
-    let (_, command) = parse_ai_response(&full_content);
+    let (_, command, file_write) = parse_ai_response(&full_content);
     let _ = app.emit(
         event_name,
         StreamEvent {
@@ -653,6 +739,7 @@ async fn call_claude_stream(
             done: true,
             error: None,
             command,
+            file_write,
         },
     );
 
@@ -850,6 +937,7 @@ async fn call_gemini_stream(
                                     done: false,
                                     error: None,
                                     command: None,
+                                    file_write: None,
                                 },
                             );
                         }
@@ -860,7 +948,7 @@ async fn call_gemini_stream(
     }
 
     let full_content = strip_think_blocks(&raw_content);
-    let (_, command) = parse_ai_response(&full_content);
+    let (_, command, file_write) = parse_ai_response(&full_content);
     let _ = app.emit(
         event_name,
         StreamEvent {
@@ -868,6 +956,7 @@ async fn call_gemini_stream(
             done: true,
             error: None,
             command,
+            file_write,
         },
     );
 
@@ -960,34 +1049,45 @@ fn strip_think_blocks(text: &str) -> String {
 }
 
 // 辅助函数：解析 AI 响应提取命令
-fn parse_ai_response(text: &str) -> (String, Option<String>) {
-    // 方法1：尝试寻找 JSON block（```json { "command": "xxx" } ```）
-    if let Some(cmd) = extract_json_command(text) {
+fn parse_ai_response(text: &str) -> (String, Option<String>, Option<AiFileWrite>) {
+    // 方法1：尝试寻找 JSON block（```json { "command": "xxx" } ``` / write_file）
+    if let Some(action) = extract_json_action(text) {
         let clean_text = remove_json_block(text);
-        return (clean_text, Some(cmd));
+        return match action {
+            AiResponseAction::Command(command) => (clean_text, Some(command), None),
+            AiResponseAction::FileWrite(file_write) => (clean_text, None, Some(file_write)),
+        };
     }
 
     // 方法2：兼容部分 OpenAI 兼容模型直接返回裸 JSON 对象。
-    if let Some(cmd) = extract_bare_json_command(text) {
-        return ("".to_string(), Some(cmd));
+    if let Some(action) = extract_bare_json_action(text) {
+        return match action {
+            AiResponseAction::Command(command) => ("".to_string(), Some(command), None),
+            AiResponseAction::FileWrite(file_write) => ("".to_string(), None, Some(file_write)),
+        };
     }
 
     // 方法3：尝试寻找 bash/shell block 中的单行命令
     if let Some(cmd) = extract_bash_command(text) {
-        return (text.to_string(), Some(cmd));
+        return (text.to_string(), Some(cmd), None);
     }
 
     // 方法4：尝试寻找 $ 开头的命令行
     if let Some(cmd) = extract_dollar_command(text) {
-        return (text.to_string(), Some(cmd));
+        return (text.to_string(), Some(cmd), None);
     }
 
     // 未找到命令
-    (text.to_string(), None)
+    (text.to_string(), None, None)
 }
 
-// 从 JSON block 中提取命令
-fn extract_json_command(text: &str) -> Option<String> {
+enum AiResponseAction {
+    Command(String),
+    FileWrite(AiFileWrite),
+}
+
+// 从 JSON block 中提取动作
+fn extract_json_action(text: &str) -> Option<AiResponseAction> {
     let patterns = ["```json", "```JSON"];
 
     for pattern in patterns {
@@ -996,8 +1096,8 @@ fn extract_json_command(text: &str) -> Option<String> {
             if let Some(end) = after_pattern.find("```") {
                 let json_str = after_pattern[..end].trim();
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
-                    if let Some(cmd) = parsed.get("command").and_then(|c| c.as_str()) {
-                        return Some(cmd.to_string());
+                    if let Some(action) = action_from_json_value(&parsed) {
+                        return Some(action);
                     }
                 }
             }
@@ -1006,22 +1106,168 @@ fn extract_json_command(text: &str) -> Option<String> {
     None
 }
 
-// 从裸 JSON 响应中提取命令：{"command":"docker ps"}
-fn extract_bare_json_command(text: &str) -> Option<String> {
+fn action_from_json_value(parsed: &serde_json::Value) -> Option<AiResponseAction> {
+    if let Some(command) = parsed.get("command").and_then(|value| value.as_str()) {
+        let command = command.trim();
+        if !command.is_empty() {
+            return Some(AiResponseAction::Command(command.to_string()));
+        }
+    }
+
+    let root_action = parsed
+        .get("action")
+        .and_then(|value| value.as_str())
+        .map(|action| action.trim())
+        .unwrap_or_default();
+    let file_value = if is_file_action(root_action) {
+        parsed
+    } else {
+        parsed
+            .get("file")
+            .or_else(|| parsed.get("file_write"))
+            .or_else(|| parsed.get("fileWrite"))?
+    };
+
+    let path = file_value
+        .get("path")
+        .and_then(|value| value.as_str())?
+        .trim();
+    if path.is_empty() {
+        return None;
+    }
+
+    let content = json_text_content(file_value.get("content")?)?;
+    let file_action = file_value
+        .get("action")
+        .and_then(|value| value.as_str())
+        .map(|action| action.trim())
+        .unwrap_or(root_action);
+    let old_content = optional_json_text_content(
+        file_value
+            .get("oldContent")
+            .or_else(|| file_value.get("old_content"))
+            .or_else(|| file_value.get("old")),
+    );
+    let anchor = file_value
+        .get("anchor")
+        .or_else(|| file_value.get("insertAfter"))
+        .or_else(|| file_value.get("insertBefore"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let anchor_mode = if file_value.get("insertBefore").is_some() {
+        Some("insert_before")
+    } else if file_value.get("insertAfter").is_some() {
+        Some("insert_after")
+    } else {
+        None
+    };
+    let mode = file_write_mode(
+        file_value,
+        file_action,
+        old_content.is_some(),
+        anchor.is_some(),
+        anchor_mode,
+    );
+    let create_if_missing = file_value
+        .get("createIfMissing")
+        .or_else(|| file_value.get("create_if_missing"))
+        .and_then(|value| value.as_bool());
+    let ensure_newline = file_value
+        .get("ensureNewline")
+        .or_else(|| file_value.get("ensure_newline"))
+        .and_then(|value| value.as_bool());
+
+    Some(AiResponseAction::FileWrite(AiFileWrite {
+        path: path.to_string(),
+        content,
+        mode,
+        old_content,
+        anchor,
+        create_if_missing,
+        ensure_newline,
+    }))
+}
+
+fn is_file_action(action: &str) -> bool {
+    matches!(
+        action,
+        "write_file"
+            | "update_file"
+            | "append_file"
+            | "replace_file"
+            | "insert_file"
+            | "insert_after"
+            | "insert_before"
+    )
+}
+
+fn file_write_mode(
+    file_value: &serde_json::Value,
+    action: &str,
+    has_old_content: bool,
+    has_anchor: bool,
+    anchor_mode: Option<&str>,
+) -> Option<String> {
+    let explicit_mode = file_value
+        .get("mode")
+        .and_then(|value| value.as_str())
+        .and_then(canonical_file_write_mode);
+    if explicit_mode.is_some() {
+        return explicit_mode;
+    }
+
+    match action {
+        "write_file" => Some("overwrite".to_string()),
+        "append_file" => Some("append".to_string()),
+        "replace_file" => Some("replace".to_string()),
+        "insert_after" => Some("insert_after".to_string()),
+        "insert_before" => Some("insert_before".to_string()),
+        _ if anchor_mode.is_some() => anchor_mode.map(|mode| mode.to_string()),
+        "insert_file" if has_anchor => Some("insert_after".to_string()),
+        "update_file" if has_old_content => Some("replace".to_string()),
+        "update_file" if has_anchor => Some("insert_after".to_string()),
+        "update_file" => Some("append".to_string()),
+        _ => Some("overwrite".to_string()),
+    }
+}
+
+fn canonical_file_write_mode(mode: &str) -> Option<String> {
+    match mode.trim() {
+        "overwrite" | "write" | "full" | "replace_all" => Some("overwrite".to_string()),
+        "append" | "append_file" => Some("append".to_string()),
+        "replace" | "replace_first" => Some("replace".to_string()),
+        "insert_after" | "insertAfter" | "after" => Some("insert_after".to_string()),
+        "insert_before" | "insertBefore" | "before" => Some("insert_before".to_string()),
+        _ => None,
+    }
+}
+
+fn json_text_content(value: &serde_json::Value) -> Option<String> {
+    if let Some(content) = value.as_str() {
+        return Some(content.to_string());
+    }
+
+    let lines = value.as_array()?;
+    lines
+        .iter()
+        .map(|line| line.as_str())
+        .collect::<Option<Vec<_>>>()
+        .map(|lines| lines.join("\n"))
+}
+
+fn optional_json_text_content(value: Option<&serde_json::Value>) -> Option<String> {
+    value.and_then(json_text_content)
+}
+
+// 从裸 JSON 响应中提取动作：{"command":"docker ps"} / {"action":"write_file",...}
+fn extract_bare_json_action(text: &str) -> Option<AiResponseAction> {
     let trimmed = text.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
         return None;
     }
 
     let parsed = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
-    let command = parsed.get("command").and_then(|value| value.as_str())?;
-    let command = command.trim();
-
-    if command.is_empty() {
-        None
-    } else {
-        Some(command.to_string())
-    }
+    action_from_json_value(&parsed)
 }
 
 // 移除 JSON block 返回干净的文本

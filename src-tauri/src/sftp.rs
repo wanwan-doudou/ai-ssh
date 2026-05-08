@@ -1041,6 +1041,63 @@ impl SftpManager {
         Ok(())
     }
 
+    /// 追加内容到远程文件
+    pub async fn append_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        content: &[u8],
+        ensure_newline: bool,
+    ) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().await;
+        let meta = sessions.get_mut(session_id).ok_or("SFTP 会话不存在")?;
+
+        let mut append_content = Vec::new();
+        if ensure_newline {
+            if let Ok(metadata) = meta.session.metadata(path).await {
+                let file_size = metadata.size.unwrap_or(0);
+                if file_size > 0 {
+                    let mut file = meta
+                        .session
+                        .open(path)
+                        .await
+                        .map_err(|e| format!("打开文件失败: {:?}", e))?;
+                    file.seek(std::io::SeekFrom::Start(file_size - 1))
+                        .await
+                        .map_err(|e| format!("定位文件末尾失败: {:?}", e))?;
+
+                    let mut last_byte = [0u8; 1];
+                    file.read_exact(&mut last_byte)
+                        .await
+                        .map_err(|e| format!("读取文件末尾失败: {:?}", e))?;
+                    if last_byte[0] != b'\n' {
+                        append_content.push(b'\n');
+                    }
+                }
+            }
+        }
+        append_content.extend_from_slice(content);
+
+        let flags = russh_sftp::protocol::OpenFlags::WRITE
+            | russh_sftp::protocol::OpenFlags::APPEND
+            | russh_sftp::protocol::OpenFlags::CREATE;
+        let mut file = meta
+            .session
+            .open_with_flags(path, flags)
+            .await
+            .map_err(|e| format!("打开文件失败: {:?}", e))?;
+
+        file.write_all(&append_content)
+            .await
+            .map_err(|e| format!("追加文件失败: {:?}", e))?;
+
+        file.flush()
+            .await
+            .map_err(|e| format!("刷新文件失败: {:?}", e))?;
+
+        Ok(())
+    }
+
     /// 断开 SFTP 会话
     pub async fn disconnect(&self, session_id: &str) -> Result<(), String> {
         let mut sessions = self.sessions.lock().await;

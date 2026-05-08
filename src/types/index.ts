@@ -126,7 +126,23 @@ export interface ChatMessage {
   command?: string;
   // 命令执行状态
   commandStatus?: 'pending' | 'approved' | 'rejected' | 'executed' | 'running' | 'completed' | 'failed' | 'cancelled' | 'timeout';
+  // AI 建议写入的远程文件
+  fileWrite?: AiFileWrite;
+  // 文件写入状态
+  fileStatus?: 'pending' | 'writing' | 'completed' | 'failed' | 'rejected' | 'unsupported';
 }
+
+export interface AiFileWrite {
+  path: string;
+  content: string;
+  mode?: AiFileWriteMode;
+  oldContent?: string;
+  anchor?: string;
+  createIfMissing?: boolean;
+  ensureNewline?: boolean;
+}
+
+export type AiFileWriteMode = 'overwrite' | 'append' | 'replace' | 'insert_after' | 'insert_before';
 
 // AI 操作模式
 // confirm: AI 建议命令后需用户确认才执行

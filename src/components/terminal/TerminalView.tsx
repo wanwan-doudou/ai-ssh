@@ -35,6 +35,7 @@ import { useTerminalStore } from "@/stores/terminalStore";
 import { useThemeStore } from "@/stores/themeStore";
 import { useTerminalDirectoryStore } from "@/stores/terminalDirectoryStore";
 import type {
+  DeviceProfile,
   ServerRuntimeInfo,
   ServerProcessInfo,
   ServerNetworkConnection,
@@ -333,6 +334,7 @@ export function TerminalView() {
     ? servers.find((server) => server.id === activeSession.serverId) ?? null
     : null;
   const activeDeviceType = activeServerConfig?.deviceType ?? "linux";
+  const activeDeviceProfile: DeviceProfile = activeServerConfig?.deviceProfile ?? "auto";
   const activeIsNetworkDevice = activeDeviceType === "network";
 
   const fetchServerInfo = useCallback(async (sessionId: string, silent = false) => {
@@ -850,6 +852,7 @@ export function TerminalView() {
             <AiChatPanel 
               sessionId={activeSessionId}
               deviceType={activeDeviceType}
+              deviceProfile={activeDeviceProfile}
               onExecuteCommand={handleExecuteCommand}
             />
           ) : (

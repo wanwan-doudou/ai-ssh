@@ -18,7 +18,7 @@ import {
   parseInstrumentedCommandOutput,
   stripPlainCommandOutput,
 } from '@/stores/terminalOutputStore';
-import type { ChatMessage } from '@/types';
+import type { AiFileWrite, AiFileWriteMode, ChatMessage, DeviceProfile } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useThemeStore } from '@/stores/themeStore';
@@ -29,11 +29,13 @@ interface StreamEvent {
   done: boolean;
   error?: string;
   command?: string;
+  fileWrite?: AiFileWrite;
 }
 
 interface AiChatPanelProps {
   sessionId: string;
   deviceType?: 'linux' | 'network';
+  deviceProfile?: DeviceProfile;
   // 执行命令到终端的回调
   onExecuteCommand: (command: string, options?: { appendNewline?: boolean }) => void;
 }
@@ -54,12 +56,136 @@ const NETWORK_PAGER_ADVANCE_INTERVAL_MS = 800;
 interface AiChatResponse {
   content: string;
   command?: string;
+  fileWrite?: AiFileWrite;
 }
 
 interface AutoCommandChain {
   commands: string[];
   count: number;
 }
+
+const getFileWriteMode = (fileWrite: AiFileWrite): AiFileWriteMode => {
+  return fileWrite.mode || 'overwrite';
+};
+
+const getFileWriteOperationLabel = (fileWrite: AiFileWrite) => {
+  switch (getFileWriteMode(fileWrite)) {
+    case 'append':
+      return '追加';
+    case 'replace':
+      return '替换';
+    case 'insert_after':
+      return '后插入';
+    case 'insert_before':
+      return '前插入';
+    case 'overwrite':
+    default:
+      return '覆盖写入';
+  }
+};
+
+const getFileWriteButtonLabel = (fileWrite: AiFileWrite) => {
+  switch (getFileWriteMode(fileWrite)) {
+    case 'append':
+      return '追加文件';
+    case 'replace':
+    case 'insert_after':
+    case 'insert_before':
+      return '更新文件';
+    case 'overwrite':
+    default:
+      return '写入文件';
+  }
+};
+
+const buildInsertedContent = (current: string, position: number, insertion: string) => {
+  const before = current.slice(0, position);
+  const after = current.slice(position);
+  let normalizedInsertion = insertion;
+
+  if (before && normalizedInsertion && !before.endsWith('\n') && !normalizedInsertion.startsWith('\n')) {
+    normalizedInsertion = `\n${normalizedInsertion}`;
+  }
+  if (after && normalizedInsertion && !normalizedInsertion.endsWith('\n') && !after.startsWith('\n')) {
+    normalizedInsertion = `${normalizedInsertion}\n`;
+  }
+
+  return `${before}${normalizedInsertion}${after}`;
+};
+
+const applyFileUpdate = (current: string, fileWrite: AiFileWrite) => {
+  const mode = getFileWriteMode(fileWrite);
+
+  if (mode === 'replace') {
+    const oldContent = fileWrite.oldContent;
+    if (!oldContent) {
+      throw new Error('replace 更新缺少 oldContent，无法定位要替换的内容');
+    }
+
+    const index = current.indexOf(oldContent);
+    if (index < 0) {
+      throw new Error('没有在远程文件中找到 oldContent，已停止更新以避免误改');
+    }
+
+    return `${current.slice(0, index)}${fileWrite.content}${current.slice(index + oldContent.length)}`;
+  }
+
+  if (mode === 'insert_after' || mode === 'insert_before') {
+    const anchor = fileWrite.anchor;
+    if (!anchor) {
+      throw new Error(`${mode} 更新缺少 anchor，无法定位插入位置`);
+    }
+
+    const anchorIndex = current.indexOf(anchor);
+    if (anchorIndex < 0) {
+      throw new Error('没有在远程文件中找到 anchor，已停止更新以避免误改');
+    }
+
+    const insertPosition = mode === 'insert_after' ? anchorIndex + anchor.length : anchorIndex;
+    return buildInsertedContent(current, insertPosition, fileWrite.content);
+  }
+
+  return fileWrite.content;
+};
+
+const formatFileWritePreview = (fileWrite: AiFileWrite) => {
+  const mode = getFileWriteMode(fileWrite);
+
+  if (mode === 'replace') {
+    return [
+      '[替换目标]',
+      fileWrite.oldContent || '(未提供 oldContent)',
+      '',
+      '[替换为]',
+      fileWrite.content || '(空内容)',
+    ].join('\n');
+  }
+
+  if (mode === 'insert_after' || mode === 'insert_before') {
+    return [
+      mode === 'insert_after' ? '[插入到此内容之后]' : '[插入到此内容之前]',
+      fileWrite.anchor || '(未提供 anchor)',
+      '',
+      '[新增内容]',
+      fileWrite.content || '(空内容)',
+    ].join('\n');
+  }
+
+  if (mode === 'append') {
+    return ['[追加内容]', fileWrite.content || '(空内容)'].join('\n');
+  }
+
+  return fileWrite.content || '(空文件)';
+};
+
+const isMissingRemoteFileError = (err: unknown) => {
+  return /no such file|not found|does not exist|不存在|NoSuchFile|SSH_FX_NO_SUCH_FILE/i.test(
+    String(err)
+  );
+};
+
+const NETWORK_FILE_WRITE_UNSUPPORTED_MESSAGE =
+  '网络设备不支持通过 SFTP 创建或修改文件，请改用设备 CLI 命令完成配置。';
 
 function buildCommandOutputContext(output: string) {
   if (output.length <= COMMAND_OUTPUT_CONTEXT_LIMIT) {
@@ -89,7 +215,12 @@ function buildCommandOutputContext(output: string) {
   };
 }
 
-export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand }: AiChatPanelProps) {
+export function AiChatPanel({
+  sessionId,
+  deviceType = 'linux',
+  deviceProfile = 'auto',
+  onExecuteCommand,
+}: AiChatPanelProps) {
   const [input, setInput] = useState('');
   const [elapsedTick, setElapsedTick] = useState(Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -126,6 +257,11 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
   const { getActiveProvider, fetchProviders } = useProviderStore();
   // 订阅主题变更，确保组件重渲染（虽然主要依赖 CSS，但这样更稳健）
   const { theme } = useThemeStore();
+  const fileWriteSupported = deviceType !== 'network';
+  const initialFileStatusFor = (fileWrite?: AiFileWrite): ChatMessage['fileStatus'] => {
+    if (!fileWrite) return undefined;
+    return fileWriteSupported ? 'pending' : 'unsupported';
+  };
   
   useEffect(() => {
     console.log('[AiChatPanel] Theme updated:', theme);
@@ -161,6 +297,21 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
     const summary = goal ? `当前任务目标：${goal}` : '';
     activeTaskSummaryRef.current = summary;
     setTaskMemory(sessionId, { goal, summary });
+  };
+
+  const initializeTaskMemoryIfEmpty = (goal: string | null = null) => {
+    const nextGoal = activeTaskGoalRef.current || goal?.trim() || null;
+    if (!nextGoal) return;
+
+    activeTaskGoalRef.current = nextGoal;
+    if (!activeTaskSummaryRef.current.trim()) {
+      activeTaskSummaryRef.current = `当前任务目标：${nextGoal}`;
+    }
+
+    setTaskMemory(sessionId, {
+      goal: activeTaskGoalRef.current,
+      summary: activeTaskSummaryRef.current,
+    });
   };
 
   const getLatestUserGoalBeforeMessage = (messageId?: string) => {
@@ -229,6 +380,8 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
         providerId: activeProvider.id,
         sessionId,
         history: [],
+        deviceType,
+        deviceProfile,
         message: [
           '请将下面的 AI 终端任务记忆压缩成结构化摘要，供后续多轮 SSH 排查继续使用。',
           `目标长度：${TASK_SUMMARY_TARGET_LENGTH} 字以内；如果确实有必要，可以略微超过，但不要丢失关键事实。`,
@@ -309,6 +462,95 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
     }
 
     executeCommandAndWaitForOutput(command, messageId);
+  };
+
+  const executeFileWrite = async (fileWrite: AiFileWrite, messageId: string) => {
+    const mode = getFileWriteMode(fileWrite);
+    const operationLabel = getFileWriteOperationLabel(fileWrite);
+
+    if (!fileWriteSupported) {
+      updateMessage(sessionId, messageId, { fileStatus: 'unsupported' });
+      addMessage(sessionId, {
+        role: 'system',
+        content: `${NETWORK_FILE_WRITE_UNSUPPORTED_MESSAGE}\n目标路径：${fileWrite.path}`,
+      });
+      appendTaskSummary([
+        `文件${operationLabel}：${fileWrite.path}`,
+        '结果：已阻止',
+        NETWORK_FILE_WRITE_UNSUPPORTED_MESSAGE,
+      ].join('\n'));
+      return;
+    }
+
+    updateMessage(sessionId, messageId, { fileStatus: 'writing' });
+
+    try {
+      if (mode === 'append') {
+        await invoke('sftp_append_file', {
+          sessionId,
+          path: fileWrite.path,
+          content: fileWrite.content,
+          ensureNewline: fileWrite.ensureNewline ?? !fileWrite.content.startsWith('\n'),
+        });
+      } else if (mode === 'overwrite') {
+        await invoke('sftp_write_file', {
+          sessionId,
+          path: fileWrite.path,
+          content: fileWrite.content,
+        });
+      } else {
+        let currentContent = '';
+        let creatingMissingFile = false;
+
+        try {
+          currentContent = await invoke<string>('sftp_read_file', {
+            sessionId,
+            path: fileWrite.path,
+          });
+        } catch (err) {
+          if (!fileWrite.createIfMissing || !isMissingRemoteFileError(err)) {
+            throw err;
+          }
+          creatingMissingFile = true;
+        }
+
+        const nextContent = creatingMissingFile
+          ? fileWrite.content
+          : applyFileUpdate(currentContent, fileWrite);
+
+        await invoke('sftp_write_file', {
+          sessionId,
+          path: fileWrite.path,
+          content: nextContent,
+        });
+      }
+    } catch (err: any) {
+      updateMessage(sessionId, messageId, { fileStatus: 'failed' });
+      addMessage(sessionId, {
+        role: 'system',
+        content: `${operationLabel}文件失败：${fileWrite.path}\n${err.toString()}`,
+      });
+      return;
+    }
+
+    updateMessage(sessionId, messageId, { fileStatus: 'completed' });
+    addMessage(sessionId, {
+      role: 'system',
+      content: `已${operationLabel}文件：${fileWrite.path}`,
+    });
+    appendTaskSummary([
+      `文件${operationLabel}：${fileWrite.path}`,
+      '结果：成功',
+      `片段长度：${fileWrite.content.length} 字符`,
+    ].join('\n'));
+    await sendOutputToAI(
+      `${mode}_file ${fileWrite.path}`,
+      [
+        `文件已${operationLabel}：${fileWrite.path}`,
+        `更新片段长度：${fileWrite.content.length} 字符`,
+      ].join('\n'),
+      0
+    );
   };
   
   // 终端输出管理
@@ -458,7 +700,7 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
       content: trimmedInput,
     });
     resetAutoCommandChain();
-    resetTaskMemory(trimmedInput);
+    initializeTaskMemoryIfEmpty(trimmedInput);
     setInput('');
     setLoading(sessionId, true);
 
@@ -522,6 +764,8 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
             content: fullContent,
             command: data.command,
             commandStatus: data.command ? 'pending' : undefined,
+            fileWrite: data.fileWrite,
+            fileStatus: initialFileStatusFor(data.fileWrite),
           });
           setLoading(sessionId, false);
           
@@ -529,6 +773,15 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
           if (data.command && operationMode === 'auto') {
             autoFormatRepairAttemptsRef.current = 0;
             executeAutoCommand(data.command, assistantMessageId);
+          }
+          if (data.fileWrite && !fileWriteSupported) {
+            addMessage(sessionId, {
+              role: 'system',
+              content: `${NETWORK_FILE_WRITE_UNSUPPORTED_MESSAGE}\n目标路径：${data.fileWrite.path}`,
+            });
+          }
+          if (data.fileWrite && operationMode === 'auto' && fileWriteSupported) {
+            void executeFileWrite(data.fileWrite, assistantMessageId);
           }
         }
       });
@@ -542,6 +795,8 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
         message: buildMessageWithTerminalContext(trimmedInput),
         sessionId,
         history,
+        deviceType,
+        deviceProfile,
       });
 
     } catch (err: any) {
@@ -741,10 +996,8 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
     const activeProvider = await ensureActiveProvider();
     if (!activeProvider) return;
 
+    initializeTaskMemoryIfEmpty(getLatestUserGoalBeforeMessage());
     const taskGoal = activeTaskGoalRef.current || getLatestUserGoalBeforeMessage();
-    if (taskGoal && !activeTaskGoalRef.current) {
-      resetTaskMemory(taskGoal);
-    }
     const taskSummary = activeTaskSummaryRef.current.trim();
 
     setLoading(sessionId, true);
@@ -804,6 +1057,7 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
           closeLocalStreamListener();
           if (
             !data.command &&
+            !data.fileWrite &&
             operationMode === 'auto' &&
             repairAttempt < MAX_AUTO_FORMAT_REPAIR_ATTEMPTS &&
             isThinkOnlyOrEmptyResponse(fullContent)
@@ -831,12 +1085,23 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
             content: fullContent,
             command: data.command,
             commandStatus: data.command ? 'pending' : undefined,
+            fileWrite: data.fileWrite,
+            fileStatus: initialFileStatusFor(data.fileWrite),
           });
           setLoading(sessionId, false);
 
           if (data.command && operationMode === 'auto') {
             autoFormatRepairAttemptsRef.current = 0;
             executeAutoCommand(data.command, assistantMessageId);
+          }
+          if (data.fileWrite && !fileWriteSupported) {
+            addMessage(sessionId, {
+              role: 'system',
+              content: `${NETWORK_FILE_WRITE_UNSUPPORTED_MESSAGE}\n目标路径：${data.fileWrite.path}`,
+            });
+          }
+          if (data.fileWrite && operationMode === 'auto' && fileWriteSupported) {
+            void executeFileWrite(data.fileWrite, assistantMessageId);
           }
         }
       });
@@ -876,6 +1141,8 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
         message: analysisPrompt,
         sessionId,
         history,
+        deviceType,
+        deviceProfile,
       });
 
     } catch (err: any) {
@@ -892,13 +1159,24 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
   const handleExecuteCommand = async (message: ChatMessage) => {
     if (!message.command) return;
     resetAutoCommandChain();
-    resetTaskMemory(getLatestUserGoalBeforeMessage(message.id));
+    initializeTaskMemoryIfEmpty(getLatestUserGoalBeforeMessage(message.id));
     await executeCommandAndWaitForOutput(message.command, message.id);
   };
 
   // 拒绝命令
   const handleRejectCommand = (message: ChatMessage) => {
     updateMessage(sessionId, message.id, { commandStatus: 'rejected' });
+  };
+
+  const handleWriteFile = async (message: ChatMessage) => {
+    if (!message.fileWrite) return;
+    resetAutoCommandChain();
+    initializeTaskMemoryIfEmpty(getLatestUserGoalBeforeMessage(message.id));
+    await executeFileWrite(message.fileWrite, message.id);
+  };
+
+  const handleRejectFileWrite = (message: ChatMessage) => {
+    updateMessage(sessionId, message.id, { fileStatus: 'rejected' });
   };
 
   // 处理键盘事件
@@ -1018,6 +1296,9 @@ export function AiChatPanel({ sessionId, deviceType = 'linux', onExecuteCommand 
               message={message}
               onExecute={() => handleExecuteCommand(message)}
               onReject={() => handleRejectCommand(message)}
+              onWriteFile={() => handleWriteFile(message)}
+              onRejectFileWrite={() => handleRejectFileWrite(message)}
+              fileWriteSupported={fileWriteSupported}
             />
           ))
         )}
@@ -1081,9 +1362,19 @@ interface MessageBubbleProps {
   message: ChatMessage;
   onExecute: () => void;
   onReject: () => void;
+  onWriteFile: () => void;
+  onRejectFileWrite: () => void;
+  fileWriteSupported: boolean;
 }
 
-function MessageBubble({ message, onExecute, onReject }: MessageBubbleProps) {
+function MessageBubble({
+  message,
+  onExecute,
+  onReject,
+  onWriteFile,
+  onRejectFileWrite,
+  fileWriteSupported,
+}: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
   
@@ -1213,6 +1504,68 @@ function MessageBubble({ message, onExecute, onReject }: MessageBubbleProps) {
                 </button>
                 <button
                   onClick={onReject}
+                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1 
+                             bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 
+                             rounded text-xs transition-colors"
+                >
+                  <X className="w-3 h-3" />
+                  取消
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {message.fileWrite && (
+          <div className="mt-2 pt-2 border-t border-surface-200 dark:border-surface-700/50">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-300 text-xs flex-shrink-0">
+                {getFileWriteOperationLabel(message.fileWrite)}
+              </span>
+              <code className="flex-1 bg-surface-100 dark:bg-surface-950/50 px-2 py-1 rounded text-xs text-blue-600 dark:text-blue-400 font-mono border border-surface-200 dark:border-transparent whitespace-pre-wrap break-all">
+                {message.fileWrite.path}
+              </code>
+
+              {message.fileStatus === 'writing' && (
+                <span className="text-xs text-amber-600 dark:text-amber-400 flex-shrink-0">更新中</span>
+              )}
+              {message.fileStatus === 'completed' && (
+                <span className="text-xs text-green-600 dark:text-green-400 flex-shrink-0">已完成</span>
+              )}
+              {message.fileStatus === 'failed' && (
+                <span className="text-xs text-red-600 dark:text-red-400 flex-shrink-0">更新失败</span>
+              )}
+              {message.fileStatus === 'rejected' && (
+                <span className="text-xs text-red-600 dark:text-red-400 flex-shrink-0">已取消</span>
+              )}
+              {message.fileStatus === 'unsupported' && (
+                <span className="text-xs text-amber-600 dark:text-amber-400 flex-shrink-0">不支持</span>
+              )}
+            </div>
+
+            <pre className="max-h-40 overflow-auto bg-surface-50 dark:bg-black/30 p-3 rounded-lg text-xs font-mono text-surface-800 dark:text-surface-200 border border-surface-200 dark:border-surface-700/50 whitespace-pre-wrap break-words">
+              {formatFileWritePreview(message.fileWrite)}
+            </pre>
+
+            {message.fileStatus === 'unsupported' && (
+              <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                {NETWORK_FILE_WRITE_UNSUPPORTED_MESSAGE}
+              </p>
+            )}
+
+            {message.fileStatus === 'pending' && fileWriteSupported && (
+              <div className="flex gap-2 mt-2">
+                <button
+                  onClick={onWriteFile}
+                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1 
+                             bg-green-500/10 hover:bg-green-500/20 text-green-600 dark:text-green-400 
+                             rounded text-xs transition-colors"
+                >
+                  <Play className="w-3 h-3" />
+                  {getFileWriteButtonLabel(message.fileWrite)}
+                </button>
+                <button
+                  onClick={onRejectFileWrite}
                   className="flex-1 flex items-center justify-center gap-1 px-2 py-1 
                              bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 
                              rounded text-xs transition-colors"

@@ -337,6 +337,26 @@ pub async fn sftp_write_file(
         .await
 }
 
+/// 追加文件内容
+#[tauri::command]
+pub async fn sftp_append_file(
+    state: State<'_, SftpState>,
+    session_id: String,
+    path: String,
+    content: String,
+    ensure_newline: Option<bool>,
+) -> Result<(), String> {
+    let manager = &state.manager;
+    manager
+        .append_file(
+            &session_id,
+            &path,
+            content.as_bytes(),
+            ensure_newline.unwrap_or(true),
+        )
+        .await
+}
+
 /// 断开 SFTP 会话
 #[tauri::command]
 pub async fn sftp_disconnect(

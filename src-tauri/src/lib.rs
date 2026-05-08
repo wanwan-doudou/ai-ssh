@@ -95,6 +95,7 @@ pub fn run() {
             commands::sftp::sftp_upload_from_file,
             commands::sftp::sftp_read_file,
             commands::sftp::sftp_write_file,
+            commands::sftp::sftp_append_file,
             commands::sftp::sftp_cancel_upload,
             commands::sftp::sftp_disconnect,
         ])
