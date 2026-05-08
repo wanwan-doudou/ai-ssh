@@ -1360,13 +1360,15 @@ fn parse_filesystems(output: &str) -> Vec<ServerFilesystemInfo> {
 pub async fn connect_ssh(
     session_id: String,
     server_id: String,
+    initial_cols: Option<u32>,
+    initial_rows: Option<u32>,
     app_state: State<'_, AppState>,
     ssh_state: State<'_, SshState>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
     println!(
-        "[CMD] connect_ssh 命令被调用: session_id={}, server_id={}",
-        session_id, server_id
+        "[CMD] connect_ssh 命令被调用: session_id={}, server_id={}, initial_cols={:?}, initial_rows={:?}",
+        session_id, server_id, initial_cols, initial_rows
     );
 
     // 从数据库获取服务器信息
@@ -1413,7 +1415,7 @@ pub async fn connect_ssh(
     // 建立 SSH 连接
     ssh_state
         .manager
-        .connect_async(&session_id, &server, app_handle)
+        .connect_async(&session_id, &server, app_handle, initial_cols, initial_rows)
         .await?;
 
     Ok(())

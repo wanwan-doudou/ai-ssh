@@ -216,7 +216,7 @@ export function TerminalView() {
   const [isResizing, setIsResizing] = useState(false);
   // SFTP 面板状态
   const [sftpPanelHeight, setSftpPanelHeight] = useState(350);
-  const [showSftpPanel, setShowSftpPanel] = useState(false);
+  const [showSftpPanel, setShowSftpPanel] = useState(true);
   // 待同步的 SFTP 目录（终端 cd 命令触发）
   const [pendingSftpDir, setPendingSftpDir] = useState<string | null>(null);
   const [showServerInfoPanel, setShowServerInfoPanel] = useState(true);
@@ -275,16 +275,16 @@ export function TerminalView() {
     setSessionConnected(sessionId, false);
   }, [setSessionConnected]);
 
+  const handleToggleSftpPanel = useCallback(() => {
+    setShowSftpPanel((prev) => !prev);
+  }, []);
+
   // 处理终端目录变化，同步到 SFTP 文件浏览器
   const handleDirectoryChange = useCallback((directory: string) => {
     console.log('[TerminalView] 检测到目录变化:', directory);
     // 设置待同步目录
     setPendingSftpDir(directory);
-    // 自动展开 SFTP 面板
-    if (!showSftpPanel) {
-      setShowSftpPanel(true);
-    }
-  }, [showSftpPanel]);
+  }, []);
 
   const handleCloseSession = (sessionId: string) => {
     setDetailTabs((prev) => prev.filter((tab) => tab.sessionId !== sessionId));
@@ -766,7 +766,7 @@ export function TerminalView() {
                   <>
                     {/* 终端区域 */}
                     <div
-                      className="relative font-mono min-h-0"
+                      className="relative font-mono min-h-0 overflow-hidden"
                       style={{ flex: showSftpPanel ? `1 1 calc(100% - ${sftpPanelHeight}px - 38px)` : '1 1 calc(100% - 32px)' }}
                     >
                       {sessions.map((session) => (
@@ -779,6 +779,7 @@ export function TerminalView() {
                             onConnected={() => handleSessionConnected(session.id)}
                             onDisconnected={() => handleSessionDisconnected(session.id)}
                             onDirectoryChange={handleDirectoryChange}
+                            layoutRevision={`${showSftpPanel ? 'sftp-open' : 'sftp-closed'}:${sftpPanelHeight}`}
                           />
                         </div>
                       ))}
@@ -787,7 +788,7 @@ export function TerminalView() {
                     {/* SFTP 面板切换按钮 */}
                     <div className="flex-shrink-0 h-8 flex items-center justify-between px-3 bg-surface-100 dark:bg-surface-900 border-t border-surface-200 dark:border-surface-800">
                       <button
-                        onClick={() => setShowSftpPanel(!showSftpPanel)}
+                        onClick={handleToggleSftpPanel}
                         className="flex items-center gap-2 text-xs text-surface-600 dark:text-surface-400 hover:text-surface-900 dark:hover:text-white transition-colors"
                       >
                         <FolderOpen className="w-4 h-4" />
@@ -1730,10 +1731,11 @@ interface TerminalInstanceProps {
   onConnected: () => void;
   onDisconnected: () => void;
   onDirectoryChange?: (directory: string) => void;
+  layoutRevision: string;
 }
 
 // 使用 memo 避免不必要的重渲染
-const TerminalInstance = memo(function TerminalInstance({ session, onConnected, onDisconnected, onDirectoryChange }: TerminalInstanceProps) {
+const TerminalInstance = memo(function TerminalInstance({ session, onConnected, onDisconnected, onDirectoryChange, layoutRevision }: TerminalInstanceProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstanceRef = useRef<any>(null);
   const fitAddonRef = useRef<any>(null);
@@ -1749,6 +1751,96 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
     connectionStatusRef.current = status;
     setConnectionStatus(status);
   }, []);
+
+  const fitTerminal = useCallback(() => {
+    const terminal = terminalInstanceRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon) return;
+
+    try {
+      fitAddon.fit();
+
+      const dims = fitAddon.proposeDimensions();
+      if (sshConnectedRef.current && dims && dims.cols >= 20 && dims.rows >= 5) {
+        invoke("resize_ssh", {
+          sessionId: session.id,
+          cols: dims.cols,
+          rows: dims.rows,
+        }).catch(console.error);
+      }
+    } catch (e) {
+      console.error("Resize error:", e);
+    }
+  }, [session.id]);
+
+  const fitTerminalAndScrollToBottom = useCallback(() => {
+    fitTerminal();
+
+    const scrollToBottom = () => {
+      try {
+        terminalInstanceRef.current?.scrollToBottom();
+      } catch (e) {
+        console.error("Scroll error:", e);
+      }
+    };
+
+    scrollToBottom();
+    window.requestAnimationFrame(scrollToBottom);
+    window.setTimeout(scrollToBottom, 80);
+  }, [fitTerminal]);
+
+  const waitForStableTerminalLayout = useCallback(async () => {
+    const nextFrame = () => new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
+
+    await nextFrame();
+    await nextFrame();
+
+    if (document.fonts?.ready) {
+      await Promise.race([
+        document.fonts.ready.catch(() => undefined),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 500)),
+      ]);
+    }
+
+    fitTerminal();
+    await nextFrame();
+    fitTerminal();
+  }, [fitTerminal]);
+
+  const getTerminalDimensions = useCallback(() => {
+    const dims = fitAddonRef.current?.proposeDimensions();
+    if (!dims || dims.cols < 20 || dims.rows < 5) {
+      return null;
+    }
+
+    return dims;
+  }, []);
+
+  useEffect(() => {
+    if (!terminalInstanceRef.current || !fitAddonRef.current) return;
+
+    const frameId = window.requestAnimationFrame(fitTerminal);
+    const timerId = window.setTimeout(fitTerminal, 80);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      window.clearTimeout(timerId);
+    };
+  }, [fitTerminal]);
+
+  useEffect(() => {
+    if (!terminalInstanceRef.current || !fitAddonRef.current) return;
+
+    const frameId = window.requestAnimationFrame(fitTerminalAndScrollToBottom);
+    const timerId = window.setTimeout(fitTerminalAndScrollToBottom, 80);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      window.clearTimeout(timerId);
+    };
+  }, [layoutRevision, fitTerminalAndScrollToBottom]);
   
   // 获取主题
   const { theme } = useThemeStore();
@@ -1831,6 +1923,7 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
         cursorBlink: true,
         cursorStyle: "bar",
         scrollback: 10000,
+        scrollOnUserInput: true,
         theme: getTerminalTheme(currentTheme),
         minimumContrastRatio: currentTheme === 'light' ? 4.5 : 1,
         allowTransparency: false, // 关闭透明，让 xterm.js 完全控制背景色
@@ -1859,16 +1952,15 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
       */
       console.log('[Terminal] 使用默认 Canvas 渲染器');
       
-      fitAddon.fit();
-
       terminalInstanceRef.current = terminal;
       fitAddonRef.current = fitAddon;
+      fitTerminal();
 
       applyTerminalTheme(terminal, terminalRef.current, currentTheme);
 
       const sendTerminalSize = (log = false) => {
-        const dims = fitAddon?.proposeDimensions();
-        if (!dims || dims.cols < 20 || dims.rows < 5) {
+        const dims = getTerminalDimensions();
+        if (!dims) {
           if (log) {
             console.warn('[Terminal] 忽略异常终端尺寸:', dims);
           }
@@ -1922,9 +2014,15 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
         console.log("[Terminal] 开始调用 connect_ssh, sessionId=", session.id, "serverId=", session.serverId);
 
         try {
+          await waitForStableTerminalLayout();
+          const initialDims = getTerminalDimensions();
+          console.log("[Terminal] 初始连接终端大小:", initialDims);
+
           const result = await invoke("connect_ssh", {
             sessionId: session.id,
             serverId: session.serverId,
+            initialCols: initialDims?.cols ?? null,
+            initialRows: initialDims?.rows ?? null,
           });
           console.log("[Terminal] connect_ssh 返回成功:", result);
 
@@ -1957,18 +2055,7 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
 
       // 使用 ResizeObserver 监听容器大小变化
       resizeObserver = new ResizeObserver(() => {
-        if (fitAddon) {
-          try {
-            fitAddon.fit();
-            // 只有在 SSH 已连接时才通知后端终端大小变化
-            // 避免在连接建立前发送 resize 命令导致 "会话不存在" 错误
-            if (sshConnectedRef.current) {
-              sendTerminalSize().catch(console.error);
-            }
-          } catch (e) {
-            console.error("Resize error:", e);
-          }
-        }
+        fitTerminal();
       });
       
       if (terminalRef.current) {
@@ -2043,6 +2130,7 @@ const TerminalInstance = memo(function TerminalInstance({ session, onConnected, 
         
         // 恢复后发送一次 resize 确保尺寸正确
         setTimeout(() => {
+          fitTerminal();
           sendTerminalSize().catch(console.error);
         }, 100);
         

@@ -191,6 +191,8 @@ impl SshManager {
         session_id: &str,
         server: &Server,
         app_handle: AppHandle,
+        initial_cols: Option<u32>,
+        initial_rows: Option<u32>,
     ) -> Result<(), String> {
         println!(
             "[SSH] 开始连接 session_id={}, server={}",
@@ -344,8 +346,15 @@ impl SshManager {
 
         println!("[SSH] 通道已打开，正在请求 PTY...");
 
+        let pty_cols = initial_cols.unwrap_or(80).clamp(20, 500);
+        let pty_rows = initial_rows.unwrap_or(24).clamp(5, 200);
+        println!(
+            "[SSH] 请求 PTY 大小 session={}, cols={}, rows={}",
+            session_id, pty_cols, pty_rows
+        );
+
         channel
-            .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
+            .request_pty(false, "xterm-256color", pty_cols, pty_rows, 0, 0, &[])
             .await
             .map_err(|e| format!("请求 PTY 失败: {:?}", e))?;
 
